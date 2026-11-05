@@ -1,0 +1,10 @@
+# macOS
+.DS_Store
+
+# ZCode 会话/计划文件（本地私有）
+.zcode/
+
+# 编辑器
+.vscode/
+.idea/
+*.swp
