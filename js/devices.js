@@ -139,7 +139,10 @@
 
     power(v) {
       this.on = v;
-      if (!v && this.powerOffCleanup) this.powerOffCleanup();
+      if (!v) {
+        NS.Terminals?.interruptOnPowerOff(this.id);
+        this.powerOffCleanup?.();
+      }
       NS.log(`${this.name}: ${v ? '开机' : '关机'}`, v ? 'ok' : 'warn');
       NS.Bus.emit('device:changed', this.id);
       NS.Bus.emit('topology:touched');

@@ -66,9 +66,9 @@
       }
       const ip = p.ip, l4 = p.payload;
       if (ip.proto === 'ICMP') {
-        if (l4.type === 8) return `Echo (ping) request  id=0x${(l4.echoId).toString(16).padStart(4, '0')}, seq=${l4.seq}, ttl=${ip.ttl}${l4.origDst ? ` (for ${l4.origDst})` : ''}`;
+        if (l4.type === 8) return `Echo (ping) request  id=0x${(l4.echoId).toString(16).padStart(4, '0')}, seq=${l4.seq}, ttl=${ip.ttl}`;
         if (l4.type === 0) return `Echo (ping) reply    id=0x${(l4.echoId).toString(16).padStart(4, '0')}, seq=${l4.seq}, ttl=${ip.ttl}`;
-        if (l4.type === 11) return `Time-to-live exceeded (in transit, for ${l4.origDst || '?'})`;
+        if (l4.type === 11) return `Time-to-live exceeded (in transit, for ${l4.quote?.ip.dst || '?'})`;
         if (l4.type === 3) return `Destination unreachable (${l4.code === 1 ? 'host' : 'network'} unreachable)`;
         return `ICMP type=${l4.type}`;
       }
@@ -171,8 +171,16 @@
           ]) + `</div>`;
         if (ip.proto === 'ICMP') {
           const typeTxt = { 8: zh ? '8 (Echo 请求)' : '8 (Echo Request)', 0: zh ? '0 (Echo 应答)' : '0 (Echo Reply)', 11: zh ? '11 (超时)' : '11 (Time Exceeded)', 3: zh ? '3 (不可达)' : '3 (Unreachable)' }[l4.type] || l4.type;
-          const fs = [['Type', typeTxt], ['Code', l4.code], ['Identifier', '0x' + (l4.echoId || 0).toString(16).padStart(4, '0')], ['Sequence', l4.seq]];
-          if (l4.origDst) fs.push([zh ? '原目的地址' : 'Original destination', l4.origDst]);
+          const fs = [['Type', typeTxt], ['Code', l4.code]];
+          const quoted = l4.quote;
+          if (quoted) fs.push([zh ? '原目的地址' : 'Original destination', quoted.ip.dst]);
+          if (quoted?.ip.proto === 'TCP') {
+            const { sport, dport, seq } = quoted.payload;
+            fs.push([zh ? '原 TCP 段' : 'Original TCP segment', `${quoted.ip.src}:${sport} → ${quoted.ip.dst}:${dport}, Seq=${seq}`]);
+          } else {
+            const echo = quoted?.payload || l4;
+            fs.push(['Identifier', '0x' + (echo.echoId || 0).toString(16).padStart(4, '0')], ['Sequence', echo.seq]);
+          }
           fs.push([zh ? '数据长度' : 'Data length', (l4.dataLen || 0) + ' B']);
           html += `<div class="dec-layer dec-icmp"><h5>Internet Control Message Protocol ${zh ? '(ICMP 报文)' : ''}</h5>` + this.fields(fs) + `</div>`;
         }

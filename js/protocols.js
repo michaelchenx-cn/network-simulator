@@ -6,7 +6,7 @@
  *   frame  = { eth:{dst,src,type}, payload, len }
  *   arp    = { op:1|2, sha, spa, tha, tpa }
  *   ipPkt  = { ip:{src,dst,ttl,proto,id}, payload }
- *   icmp   = { type:8|0|11|3, code, echoId, seq, dataLen, origDst? }
+ *   icmp   = { type:8|0|11|3, code, dataLen, echoId?, seq?, quote? }
  *   tcpSeg = { sport, dport, flags:{SYN,ACK,FIN,RST,PSH}, seq, ack, win, dataLen, data? }
  */
 (function (root) {
@@ -48,7 +48,7 @@
   NS.macWin = (m) => (m || '').replace(/:/g, '-').toUpperCase();
 
   /* ══════════ 报文工厂 ══════════ */
-  let ipId = 1, flightId = 1;
+  let ipId = 1, flightId = 1, nextEchoId = 0x1001;
   const Frames = {
     arp(op, sha, spa, tha, tpa) {
       return { eth: { dst: op === 1 ? 'FF:FF:FF:FF:FF:FF' : tha, src: sha, type: 'ARP' },
@@ -61,8 +61,16 @@
                payload: { ip: { src: srcIp, dst: dstIp, ttl, proto, id: ipId++ }, payload },
                len: hdr + l4len };
     },
-    icmp(type, code, echoId, seq, dataLen, origDst) {
-      return { proto: 'ICMP', type, code, echoId, seq, dataLen, origDst, len: 8 + (dataLen || 0) };
+    icmp(type, code, echoId, seq, dataLen) {
+      return { proto: 'ICMP', type, code, echoId, seq, dataLen, len: 8 + (dataLen || 0) };
+    },
+    icmpError(type, code, packet) {
+      const { ip, payload } = packet;
+      // ICMP 错误引用原 IP 头和传输层开头。TCP 只需端口与序号即可匹配发送方。
+      const transport = ip.proto === 'TCP'
+        ? { sport: payload.sport, dport: payload.dport, seq: payload.seq }
+        : { type: payload.type, echoId: payload.echoId, seq: payload.seq };
+      return { proto: 'ICMP', type, code, quote: { ip: { ...ip }, payload: transport }, dataLen: 28, len: 36 };
     },
     tcp(sport, dport, flags, seq, ack, data) {
       const f = {};
@@ -252,18 +260,20 @@
      * onDone(result):
      *   {kind:'reply', from, ms, ttl}  正常回复
      *   {kind:'timeout'}               超时 / ARP 失败
-     *   {kind:'tlexceeded', from}      TTL 超时（tracert 中间跳）
-     *   {kind:'unreachable', from, code}  目标不可达
+     *   {kind:'tlexceeded', from, ms}   TTL 超时（tracert 中间跳）
+     *   {kind:'unreachable', from, ms, code}  目标不可达
      *   {kind:'noroute'}               本机无路由（传输失败） */
-    icmpEcho(dev, dstIp, { echoId, seq = 1, ttl = 128, size = 32, timeout } = {}, onDone) {
+    icmpEcho(dev, dstIp, { echoId = nextEchoId++, seq = 1, ttl = 128, size = 32, timeout } = {}, onDone) {
       if (!dev.icmpCbs) dev.icmpCbs = new Map();
       let done = false;
-      const finish = (res) => {
-        if (done) return; done = true;
+      const cancel = () => {
+        if (done) return false;
+        done = true;
         Engine.cancel(timer);
-        dev.icmpCbs.delete(echoId);
-        onDone(res);
+        if (dev.icmpCbs.get(echoId) === entry) dev.icmpCbs.delete(echoId);
+        return true;
       };
+      const finish = (res) => { if (cancel()) onDone(res); };
       const sentAt = Engine.time;
       const entry = { finish, sentAt };
       dev.icmpCbs.set(echoId, entry);
@@ -271,8 +281,10 @@
 
       this.sendIp(dev, dstIp, Frames.icmp(8, 0, echoId, seq, size), {
         ttl,
+        cancelled: () => done,
         errCb: (e) => finish(e === 'arptimeout' ? { kind: 'timeout', arp: true } : { kind: 'noroute' }),
       });
+      return cancel;
     },
 
     /* ICMP 入站处理（目标是自己） */
@@ -280,13 +292,26 @@
       const ip = ipPkt.ip;
       if (icmp.type === 8) {                       // echo request → 回复
         this.sendIp(dev, ip.src, Frames.icmp(0, 0, icmp.echoId, icmp.seq, icmp.dataLen), { ttl: 128, srcIp: ip.dst });
-      } else if (icmp.type === 0 || icmp.type === 11 || icmp.type === 3) {
-        const entry = dev.icmpCbs && dev.icmpCbs.get(icmp.echoId);
-        if (!entry) return;
-        if (icmp.type === 0) entry.finish({ kind: 'reply', from: ip.src, ms: Engine.time - entry.sentAt, ttl: ip.ttl });
-        else if (icmp.type === 11) entry.finish({ kind: 'tlexceeded', from: ip.src });
-        else entry.finish({ kind: 'unreachable', from: ip.src, code: icmp.code });
+        return;
       }
+      if (icmp.type === 0) {
+        const entry = dev.icmpCbs?.get(icmp.echoId);
+        if (entry) entry.finish({ kind: 'reply', from: ip.src, ms: Engine.time - entry.sentAt, ttl: ip.ttl });
+        return;
+      }
+      if (icmp.type !== 3 && icmp.type !== 11) return;
+      const quote = icmp.quote;
+      if (!quote || quote.ip.src !== ip.dst) return;
+      if (quote.ip.proto === 'TCP') {
+        this.tcp.icmpError(dev, icmp, ip.src);
+        return;
+      }
+      if (quote.ip.proto !== 'ICMP' || quote.payload.type !== 8) return;
+      const entry = dev.icmpCbs?.get(quote.payload.echoId);
+      if (!entry) return;
+      const ms = Engine.time - entry.sentAt;
+      if (icmp.type === 11) entry.finish({ kind: 'tlexceeded', from: ip.src, ms });
+      else entry.finish({ kind: 'unreachable', from: ip.src, ms, code: icmp.code });
     },
 
     /* ───── TCP ───── */
@@ -351,8 +376,35 @@
       },
 
       abort(conn, silent) {                         // 本地放弃（关机 / Ctrl+C）
+        if (!this.isOpen(conn)) return;
+        const state = conn.state;
         this._drop(conn);
+        if (state !== 'SYN_SENT' && state !== 'TIME_WAIT') {
+          const rst = Frames.tcp(conn.localPort, conn.remotePort, { RST: 1 }, conn.seq, 0);
+          Proto.sendIp(conn.dev, conn.remoteIp, rst, { srcIp: conn.localIp });
+        }
         if (!silent && conn.app.onErr) conn.app.onErr('aborted');
+        Bus.emit('device:changed', conn.dev.id);
+      },
+
+      icmpError(dev, { type, code, quote }, from) {
+        // 当前路由器只生成网络/主机不可达及 TTL 超时，三者均为软错误。
+        if (type === 3 && code !== 0 && code !== 1) return;
+        const { ip, payload } = quote;
+        const conn = this.connsOf(dev).find(c => c.localIp === ip.src && c.remoteIp === ip.dst &&
+          c.localPort === payload.sport && c.remotePort === payload.dport);
+        const record = conn?._unacked?.find(r => r.seg.seq === payload.seq);
+        if (!record) return;
+        const previous = record.icmpError;
+        if (previous?.type === type && previous.code === code && previous.from === from) return;
+        // 不可达和 TTL 超时可能由暂时故障导致，告知应用并继续重传。
+        record.icmpError = { type, code, from };
+        conn.app.onNetworkError?.(record.icmpError);
+      },
+
+      _fail(conn, reason, detail) {
+        this._drop(conn);
+        conn.app.onErr?.(reason, detail);
         Bus.emit('device:changed', conn.dev.id);
       },
 
@@ -373,24 +425,25 @@
         const emit = () => Proto.sendIp(dev, conn.remoteIp, seg, {
           srcIp: conn.localIp === '0.0.0.0' ? undefined : conn.localIp, ttl: 128,
           cancelled: () => conn.state === 'CLOSED' || (length && !pending.includes(record)),
+          errCb: reason => {
+            if (conn.state === 'SYN_SENT' && (reason === 'noroute' || reason === 'badgw')) this._fail(conn, reason);
+          },
         });
         record.emit = emit;
         const arm = () => {
           if (!pending.includes(record) || conn.state === 'CLOSED') return;
           if (record.retries-- <= 0) {
-            this._drop(conn);
             NS.log(`${dev.name}: TCP 重传超时，连接关闭`, 'warn');
-            if (conn.app.onErr) conn.app.onErr('timeout');
-            Bus.emit('device:changed', dev.id);
+            this._fail(conn, record.icmpError ? 'icmp' : 'timeout', record.icmpError);
             return;
           }
           NS.log(`${dev.name}: 重传 ${this.segInfo(seg)}`, 'warn');
-          emit();
           record.rto *= 2;
           record.timer = Engine.schedule(record.rto, arm, 'tcp-rto');
+          emit();
         };
-        emit();
         if (length) record.timer = Engine.schedule(record.rto, arm, 'tcp-rto');
+        emit();
       },
 
       _clearRt(conn) {
@@ -436,12 +489,7 @@
         const conn = conns.find(c => c.localIp === ip.dst && c.remoteIp === ip.src && c.remotePort === seg.sport && c.localPort === seg.dport);
 
         if (seg.flags.RST) {
-          if (conn) {
-            conn.state = 'CLOSED';
-            this._drop(conn);
-            if (conn.app.onErr) conn.app.onErr('refused');
-          }
-          Bus.emit('device:changed', dev.id);
+          if (conn) this._fail(conn, conn.state === 'SYN_SENT' ? 'refused' : 'reset');
           return;
         }
 
@@ -467,6 +515,10 @@
               NS.log(`${dev.name}: 端口 ${seg.dport} 未监听，发送 RST`, 'warn');
               Proto.sendIp(dev, ip.src, Frames.tcp(seg.dport, seg.sport, { RST: 1, ACK: 1 }, 0, seg.seq + 1), { ttl: 128, srcIp: ip.dst });
             }
+          } else if (seg.flags.SYN && seg.flags.ACK) {
+            // 客户端已中断握手时，通知对端清理半开连接。
+            const rst = Frames.tcp(seg.dport, seg.sport, { RST: 1 }, seg.ack, 0);
+            Proto.sendIp(dev, ip.src, rst, { srcIp: ip.dst });
           }
           return;
         }
@@ -617,6 +669,12 @@
       /* 主机不转发，直接丢弃 */
     },
 
+    sendIcmpError(dev, inIf, packet, type, code) {
+      // 已经是 ICMP 错误的报文无需再返回错误。
+      if (packet.ip.proto === 'ICMP' && (packet.payload.type === 3 || packet.payload.type === 11)) return;
+      this.sendIp(dev, packet.ip.src, Frames.icmpError(type, code, packet), { srcIp: inIf.ip });
+    },
+
     /* ───── 路由器转发 ───── */
     forward(dev, inIf, ipPkt) {
       const ip = ipPkt.ip;
@@ -625,21 +683,21 @@
 
       if (newTtl <= 0) {
         NS.log(`${dev.name}: TTL 超时，向 ${ip.src} 发送 ICMP Time Exceeded`, 'warn');
-        Proto.sendIp(dev, ip.src, Frames.icmp(11, 0, (l4.echoId != null ? l4.echoId : 0), (l4.seq || 0), 0, ip.dst), { srcIp: inIf.ip, ttl: 128, errCb: () => {} });
+        this.sendIcmpError(dev, inIf, ipPkt, 11, 0);
         return;
       }
 
       const r = this.routerRoute(dev, ip.dst);
       if (r.err) {
         NS.log(`${dev.name}: 无到 ${ip.dst} 的路由，发送 ICMP 不可达(code 0)`, 'warn');
-        Proto.sendIp(dev, ip.src, Frames.icmp(3, 0, (l4.echoId != null ? l4.echoId : 0), (l4.seq || 0), 0, ip.dst), { srcIp: inIf.ip, ttl: 128, errCb: () => {} });
+        this.sendIcmpError(dev, inIf, ipPkt, 3, 0);
         return;
       }
 
       this.arpResolve(dev, r.ifce, r.nextHop, (err, mac) => {
         if (err) {   // 最后一级 ARP 失败 → host unreachable
           NS.log(`${dev.name}: 下一跳 ${r.nextHop} ARP 失败，发送 ICMP 不可达(code 1)`, 'warn');
-          Proto.sendIp(dev, ip.src, Frames.icmp(3, 1, (l4.echoId != null ? l4.echoId : 0), (l4.seq || 0), 0, ip.dst), { srcIp: inIf.ip, ttl: 128, errCb: () => {} });
+          this.sendIcmpError(dev, inIf, ipPkt, 3, 1);
           return;
         }
         const forwarded = { ...ipPkt, ip: { ...ip, ttl: newTtl } };

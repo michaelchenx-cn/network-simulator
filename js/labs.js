@@ -8,12 +8,8 @@
   function cfg(dev, ifName, ip, mask, gw) { dev.setIfConfig(ifName, { ip, mask, gw: gw || '' }); }
 
   /* ping 型验收 */
-  function pingCheck(from, targetIp) {
-    return (done) => {
-      NS.SimLoop.play();
-      NS.Proto.icmpEcho(from, targetIp, { echoId: 0x7A00 + Math.floor(Math.random() * 255), timeout: 3000 },
-        (res) => done(res.kind === 'reply'));
-    };
+  function pingCheck(from, targetIp, done) {
+    return NS.Proto.icmpEcho(from, targetIp, { timeout: 3000 }, res => done(res.kind === 'reply'));
   }
 
   const LABS = [
@@ -60,7 +56,7 @@
           run(done) {
             const pcs = [...NS.world.devices.values()].filter(d => d.type === 'pc');
             if (pcs.length < 2) return done(false);
-            pingCheck(pcs[0], pcs[1].interfaces[0].ip)(done);
+            return pingCheck(pcs[0], pcs[1].interfaces[0].ip, done);
           },
         },
       ],
@@ -112,7 +108,7 @@
           run(done) {
             const pc1 = [...NS.world.devices.values()].find(d => d.name === 'PC1');
             if (!pc1) return done(false);
-            pingCheck(pc1, '192.168.2.10')(done);
+            return pingCheck(pc1, '192.168.2.10', done);
           } },
       ],
     },
@@ -172,14 +168,14 @@
       goals: {
         zh: [
           '在 <code>PC1</code> 执行 <code>telnet 192.168.1.20</code> 前先点击工具栏 <b>⏸ 暂停</b>，输入命令后连按 <b>⏭ 单步</b>：逐帧观察 <code>SYN → SYN·ACK → ACK</code> 三次握手',
-          '连接期间另开窗口观察：PC1 终端执行 <code>netstat</code>，可看到 <code>SYN_SENT → ESTABLISHED</code> 状态；服务器属性面板的 TCP 连接表同步变化',
+          '单击 <code>PC1</code> 或服务器，在右侧属性面板的 TCP 连接表观察 <code>SYN_SENT</code>、<code>SYN_RCVD</code> 和 <code>ESTABLISHED</code> 状态',
           '输入任意文字回车（作为数据发送），再输入 <code>quit</code> 断开：单步观察四次挥手 <code>FIN → ACK → FIN → ACK</code>',
           '断开后立即在 PC1 执行 <code>netstat</code>：还能看到 <code>TIME_WAIT</code> 状态（等待 2MSL 后才彻底关闭）',
           '再试 <code>http 192.168.1.20</code> 观察完整流程：握手 → GET → 响应 → 服务器主动挥手；把服务器 HTTP 服务关掉重试，观察 <code>RST</code>（连接被拒绝）',
         ],
         en: [
           'Pause the sim (⏸), then run <code>telnet 192.168.1.20</code> on <code>PC1</code> and press <b>step (⏭)</b> repeatedly: watch <code>SYN → SYN·ACK → ACK</code>',
-          'While connected run <code>netstat</code> on PC1: <code>SYN_SENT → ESTABLISHED</code>; the server inspector shows the matching connection',
+          'Select <code>PC1</code> or the server to watch <code>SYN_SENT</code>, <code>SYN_RCVD</code> and <code>ESTABLISHED</code> in the inspector’s TCP table',
           'Type a line (data), then <code>quit</code>: step through the 4-way close <code>FIN → ACK → FIN → ACK</code>',
           'Right after closing run <code>netstat</code>: <code>TIME_WAIT</code> lingers for 2MSL',
           'Try <code>http 192.168.1.20</code>: handshake → GET → response → server-initiated close. Disable HTTP on the server and retry to see <code>RST</code> (refused)',
@@ -254,7 +250,7 @@
           run(done) {
             const pc1 = [...NS.world.devices.values()].find(d => d.name === 'PC1');
             if (!pc1) return done(false);
-            pingCheck(pc1, '192.168.2.10')(done);
+            return pingCheck(pc1, '192.168.2.10', done);
           } },
       ],
     },
@@ -262,9 +258,14 @@
 
   const Labs = {
     active: null,
+    _checkRun: null,
 
     init() {
       NS.I18N.onChange(() => { this.renderList(); this.renderActive(); });
+      NS.Bus.on('world:cleared', () => {
+        this.stopChecks();
+        document.getElementById('lab-checks')?.replaceChildren();
+      });
       this.renderList();
     },
 
@@ -297,6 +298,7 @@
     },
 
     renderActive() {
+      this.stopChecks();
       const box = document.getElementById('labs-list');
       const exist = document.getElementById('lab-active');
       if (exist) exist.remove();
@@ -310,6 +312,7 @@
       const actions = document.createElement('div');
       actions.className = 'lab-actions';
       const chk = document.createElement('button');
+      chk.id = 'lab-verify';
       chk.textContent = NS.I18N.lang === 'zh' ? '✓ 验证' : '✓ Verify';
       chk.addEventListener('click', () => this.runChecks());
       actions.appendChild(chk);
@@ -333,28 +336,46 @@
       box.prepend(div);
     },
 
+    stopChecks() {
+      const run = this._checkRun;
+      if (!run) return;
+      this._checkRun = null;
+      clearTimeout(run.timer);
+      run.cancel?.();
+      run.button.disabled = false;
+    },
+
     runChecks() {
+      if (this._checkRun) return;
       const lab = this.active;
       const box = document.getElementById('lab-checks');
-      if (!lab || !box) return;
-      box.innerHTML = '';
+      const button = document.getElementById('lab-verify');
+      if (!lab || !box || !button || !lab.checks.length) return;
+      const run = { button, timer: null, cancel: null };
+      this._checkRun = run;
+      button.disabled = true;
+      box.replaceChildren();
       NS.SimLoop.play();
       const queue = lab.checks.slice();
       const next = () => {
-        if (!queue.length) return;
+        if (this._checkRun !== run) return;
         const c = queue.shift();
         const row = document.createElement('div');
         row.className = 'lab-check';
         row.innerHTML = `<span class="mark">…</span><span>${pick(c.label)}</span>`;
         box.appendChild(row);
         const mark = row.querySelector('.mark');
+        const done = (pass) => {
+          if (this._checkRun !== run) return;
+          run.cancel = null;
+          row.classList.add(pass ? 'ok' : 'bad');
+          mark.textContent = pass ? '✓' : '✗';
+          if (queue.length) run.timer = setTimeout(next, 300);
+          else this.stopChecks();
+        };
         try {
-          c.run((pass) => {
-            row.classList.add(pass ? 'ok' : 'bad');
-            mark.textContent = pass ? '✓' : '✗';
-            setTimeout(next, 300);
-          });
-        } catch (e) { console.error(e); row.classList.add('bad'); mark.textContent = '✗'; next(); }
+          run.cancel = c.run(done);
+        } catch (e) { console.error(e); done(false); }
       };
       next();
     },

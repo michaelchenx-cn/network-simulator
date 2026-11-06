@@ -24,8 +24,8 @@
     const l4 = p.payload;
     if (p.ip.proto === 'ICMP') {
       if (l4.type === 8) return { color: '#0d9488', label: 'ICMP' };
-      if (l4.type === 0) return { color: '#14b8a6', label: 'ICMP回' };
-      return { color: '#dc2626', label: 'ICMP错' };
+      if (l4.type === 0) return { color: '#14b8a6', label: NS.t('canvas.icmpReply') };
+      return { color: '#dc2626', label: NS.t('canvas.icmpError') };
     }
     if (p.ip.proto === 'TCP') {
       const f = l4.flags;
@@ -76,12 +76,18 @@
         this.linkFrom = null; this._drag = null; this._lastDevClick = null;
         this.select(null);
       });
-      NS.Bus.on('device:changed', () => this.redraw());
+      // ARP、MAC 和 TCP 的运行态变化只刷新属性面板，不替换画布节点。
+      NS.Bus.on('topology:touched', () => this.redraw());
       NS.Bus.on('flight', (f) => this.flights.set(f.id, f));
       NS.Bus.on('flight:end', (id) => this.flights.delete(id));
       NS.Bus.on('link:duplicate', () => NS.toast && NS.toast(NS.t('toast.linkDup'), 'warn'));
       NS.Bus.on('link:fail', () => NS.toast && NS.toast(NS.t('toast.noFreePort'), 'warn'));
       NS.SimLoop.onTick(() => this.renderFlights());
+      NS.I18N.onChange(() => {
+        this.redraw();
+        gPkts().replaceChildren();
+        this.renderFlights();
+      });
 
       this.applyView();
       this.redraw();
@@ -210,7 +216,10 @@
         this._drag.node.classList.remove('dragging');
         this._drag = null;
         if (!moved) this.select({ type: 'device', id: dev.id });     /* 点击 = 选中 */
-        else NS.Bus.emit('topology:touched');
+        else {
+          this._lastDevClick = null;
+          NS.Bus.emit('topology:touched');
+        }
       }
       if (this._pan) { this._pan = null; svg().classList.remove('panning'); }
     },
@@ -252,7 +261,14 @@
       this.redrawLinksOnly();
       const gd = gDevs();
       gd.innerHTML = '';
-      [...NS.world.devices.values()].forEach(d => gd.appendChild(this.drawDevice(d)));
+      for (const d of NS.world.devices.values()) {
+        const node = this.drawDevice(d);
+        if (this._drag?.dev === d) {
+          this._drag.node = node;
+          node.classList.add('dragging');
+        }
+        gd.appendChild(node);
+      }
     },
 
     redrawLinksOnly() {
@@ -297,7 +313,10 @@
       const sub = el('text', { class: 'dev-sub', y: 50 });
       if (d.type === 'pc' || d.type === 'server') sub.textContent = d.interfaces[0].ip || NS.t('canvas.unconfigured');
       else if (d.type === 'router') sub.textContent = d.interfaces.filter(i => i.ip).map(i => i.ip).join(' · ') || NS.t('canvas.unconfigured');
-      else sub.textContent = d.interfaces.filter(i => i.linkId).length + ' 口' + NS.t('canvas.linked');
+      else {
+        const ports = d.interfaces.filter(i => i.linkId).length;
+        sub.textContent = ports + NS.t(ports === 1 ? 'canvas.portLinked' : 'canvas.portsLinked');
+      }
       g.append(name, sub);
 
       const hit = el('rect', { class: 'dev-hitbox', x: -26, y: -26, width: 52, height: 78, fill: 'transparent' });
@@ -347,6 +366,9 @@
   NS.Canvas = Canvas;
   NS.I18N.register({
     'canvas.unconfigured': { zh: '未配置', en: 'unconfigured' },
-    'canvas.linked': { zh: '连接', en: ' linked' },
+    'canvas.portLinked': { zh: ' 口连接', en: ' port linked' },
+    'canvas.portsLinked': { zh: ' 口连接', en: ' ports linked' },
+    'canvas.icmpReply': { zh: 'ICMP回', en: 'REPLY' },
+    'canvas.icmpError': { zh: 'ICMP错', en: 'ERROR' },
   });
 })(typeof window !== 'undefined' ? window : globalThis);

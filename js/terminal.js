@@ -57,8 +57,8 @@
       this.print(zh ? '(c) Microsoft Corporation。保留所有权利。'
                     : '(c) Microsoft Corporation. All rights reserved.', 'term-banner');
       this.print('');
-      this.print(L('提示: 输入 help 查看可用命令；Ctrl+C 可中断 ping -t / tracert / telnet',
-                  'Tip: type "help" for commands; Ctrl+C interrupts ping -t / tracert / telnet'), 't-dim');
+      this.print(L('输入 help 查看可用命令。按 Ctrl+C 中断正在运行的命令。',
+                  'Type help for available commands. Press Ctrl+C to interrupt a running command.'), 't-dim');
       this.print('');
     }
 
@@ -75,7 +75,28 @@
 
     focus() { this.input.focus(); }
 
+    abortJob() {
+      const job = this.job;
+      if (!job) return;
+      this.job = null;
+      this.input.readOnly = false;
+      try { job.abort(); } catch (err) { console.error(err); }
+    }
+
     onKey(e) {
+      if (e.ctrlKey && e.key.toLowerCase() === 'c') {
+        this.print('^C');
+        this.abortJob();
+        e.preventDefault();
+        return;
+      }
+      if (this.input.readOnly) {
+        if (e.key === 'Enter') {
+          this.print(NS.t('term.busy'), 't-dim');
+          e.preventDefault();
+        }
+        return;
+      }
       if (e.key === 'Enter') {
         const line = this.input.value;
         this.input.value = '';
@@ -91,10 +112,6 @@
         if (this.hIdx < this.history.length - 1) { this.hIdx++; this.input.value = this.history[this.hIdx] || ''; }
         else { this.hIdx = this.history.length; this.input.value = ''; }
         e.preventDefault();
-      } else if (e.key === 'c' && e.ctrlKey) {
-        this.print('^C');
-        if (this.job) { const j = this.job; this.job = null; try { j.abort(); } catch (err) { console.error(err); } }
-        e.preventDefault();
       }
     }
 
@@ -104,18 +121,32 @@
         this.print(L('设备已关机，无法执行命令。请在右侧属性面板开机。', 'Device is powered off. Turn it on in the inspector panel.'), 't-err');
         return;
       }
-      /* 异步作业占用输入（telnet 会话） */
-      if (this.job && this.job.wantsInput && this.job.onLine) { this.job.onLine(line); return; }
+      if (this.job) {
+        if (this.job.wantsInput) this.job.onLine(line);
+        else this.print(NS.t('term.busy'), 't-dim');
+        return;
+      }
 
+      let job;
+      let finished = false;
       const ctx = {
         dev: this.dev,
         print: (t, c) => this.print(t, c),
         clear: () => this.clear(),
-        endJob: () => { this.job = null; },
+        endJob: () => {
+          finished = true;
+          if (job && this.job === job) {
+            this.job = null;
+            this.input.readOnly = false;
+          }
+        },
         exit: () => NS.Terminals.close(this.dev.id),
       };
-      const job = NS.Commands.execute(line, ctx);
-      if (job) { this.job = job; job._term = this; }
+      job = NS.Commands.execute(line, ctx);
+      if (job && !finished) {
+        this.job = job;
+        this.input.readOnly = !job.wantsInput;
+      }
     }
   }
 
@@ -126,7 +157,7 @@
 
     open(devId) {
       const dev = NS.world.devices.get(devId);
-      if (!dev || dev.type === 'switch' && false) return;      // 交换机也给终端（show mac）
+      if (!dev) return;
       let t = this.map.get(devId);
       if (!t) {
         t = new Terminal(dev);
@@ -152,7 +183,7 @@
     close(devId) {
       const t = this.map.get(devId);
       if (!t) return;
-      if (t.job) { try { t.job.abort(); } catch (e) {} t.job = null; }
+      t.abortJob();
       t.tab.remove(); t.win.remove();
       this.map.delete(devId);
       if (this.activeId === devId) {
@@ -162,6 +193,13 @@
     },
 
     closeAll() { [...this.map.keys()].forEach(id => this.close(id)); },
+
+    interruptOnPowerOff(devId) {
+      const terminal = this.map.get(devId);
+      if (!terminal?.job) return;
+      terminal.abortJob();
+      terminal.print(NS.t('term.powerOff'), 't-err');
+    },
 
     /* 设备更名时同步页签 */
     rename(devId) {
@@ -190,5 +228,7 @@
 
   NS.I18N.register({
     'term.empty': { zh: '双击画布中的设备打开命令行终端', en: 'Double-click a device on the canvas to open its terminal' },
+    'term.busy': { zh: '当前命令正在运行。按 Ctrl+C 中断。', en: 'A command is running. Press Ctrl+C to interrupt it.' },
+    'term.powerOff': { zh: '设备已关机，当前命令已中断。', en: 'Device powered off. The current command was interrupted.' },
   });
 })(typeof window !== 'undefined' ? window : globalThis);

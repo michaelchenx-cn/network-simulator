@@ -78,7 +78,8 @@ svg text { user-select: none; }
 #lab-active .lab-actions button {
   padding: 4px 12px; border-radius: 6px; border: 1px solid #c7d2e0; background: #fff; font-size: 12px;
 }
-#lab-active .lab-actions button:hover { background: #f3f6fb; }
+#lab-active .lab-actions button:hover:enabled { background: #f3f6fb; }
+#lab-active .lab-actions button:disabled { cursor: default; opacity: .65; }
 
 /* ═══════════════════════ 画布 ═══════════════════════ */
 #canvas-wrap { flex: 1; position: relative; overflow: hidden; background: #fbfcfe; }

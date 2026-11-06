@@ -77,6 +77,7 @@
     'insp.linkTo':    { zh: '连接到', en: 'links to' },
     'insp.notLinked': { zh: '未连接', en: 'not linked' },
     'insp.routes':    { zh: '静态路由', en: 'Static routes' },
+    'insp.defaultRoute': { zh: '/0（默认路由）', en: '/0 (Default route)' },
     'insp.dest':      { zh: '目标网络', en: 'Destination' },
     'insp.nh':        { zh: '下一跳', en: 'Next hop' },
     'insp.addRoute':  { zh: '＋ 添加路由', en: '＋ Add route' },
@@ -127,6 +128,7 @@
 
     /* ── 事件日志 ── */
     'log.title': { zh: '事件日志（仿真内核）', en: 'Event log (simulation kernel)' },
+    'log.clear': { zh: '清空日志', en: 'Clear log' },
     'log.cleared': { zh: '日志已清空', en: 'Log cleared' },
 
     /* ── 帮助 ── */

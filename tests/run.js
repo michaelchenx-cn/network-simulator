@@ -532,6 +532,151 @@ section('T20 高延迟链路和本地 TCP');
   assert(NS.Proto.tcp.connsOf(server).length === 0, '回环 HTTP 双方连接均完成关闭');
 }
 
+section('T21 静态路由命令要求显式下一跳');
+{
+  const { PC1 } = loadLab('lab-route');
+  const output = [];
+  const ctx = { dev: PC1, print: (text, level) => output.push({ text, level }) };
+  for (const command of ['route add 3.3.3.0 mask 255.255.255.0', 'route add 4.4.4.0']) {
+    NS.Commands.execute(command, ctx);
+    assert(!PC1.staticRoutes.length && output.at(-1).level === 't-err', `${command} 报错且不增加路由`);
+  }
+  NS.Commands.execute('route add 192.168.1.100 192.168.1.100', ctx);
+  const route = PC1.staticRoutes[0];
+  assert(route?.mask === '255.255.255.255' && route.nh === '192.168.1.100', '显式指定下一跳时可添加 /32 主机路由');
+}
+
+section('T22 TCP 网络错误、连接匹配和重试恢复');
+{
+  const { PC1 } = loadLab('lab-route');
+  const telnet = [], http = [];
+  let ended = 0;
+  const tcp = NS.Proto.tcp;
+  const target = '192.168.2.99';
+  droppingFrames((dev, frame) => frame.payload.payload?.quote?.payload.dport === 80, () => {
+    NS.Commands.execute(`telnet ${target}`, { dev: PC1, print: text => telnet.push(text), endJob() { ended++; } });
+    NS.Commands.execute(`http ${target}`, { dev: PC1, print: text => http.push(text), endJob() { ended++; } });
+    NS.Engine.advanceUntilIdle(NS.Proto.TCP_RTO - 1);
+    assert(telnet.some(text => text.includes('192.168.1.1 报告目标网络不可达')) && ended === 0,
+      '路由器错误在首次重传前显示，连接保持重试');
+    assert(!http.some(text => text.includes('目标网络不可达')) && tcp.connsOf(PC1).length === 2,
+      'ICMP 只通知原 TCP 连接，同一目的 IP 的另一连接不受影响');
+    NS.Engine.advanceUntilIdle(10000);
+    assert(ended === 2 && !tcp.connsOf(PC1).length && telnet.filter(text => text.includes('正在重试')).length === 1 &&
+      telnet.at(-1).includes('目标网络不可达') && http.at(-1).includes('连接超时'), '重试耗尽显示各自的失败原因，不重复刷警告');
+  });
+
+  for (const [gw, expected] of [['', 'noroute'], ['10.0.0.1', 'badgw']]) {
+    PC1.setIfConfig('eth0', { gw });
+    let error;
+    const conn = tcp.open(PC1, target, 80, { onErr: reason => { error = reason; } });
+    assert(error === expected && conn.state === 'CLOSED' && NS.Engine.advanceUntilIdle() === 0,
+      `本机 ${expected} 同步结束连接，清理重传计时器`);
+  }
+}
+{
+  const { PC1, PC2, Router1, Router2 } = loadLab('lab-route');
+  const tcp = NS.Proto.tcp;
+  tcp.listen(PC2, 23, 'telnet');
+  let warned = false, opened = false, error;
+  const conn = tcp.open(PC1, PC2.getInterface('eth0').ip, 23, {
+    onNetworkError() { warned = true; }, onOpen() { opened = true; }, onErr(reason) { error = reason; },
+  });
+  NS.Engine.advanceUntilIdle(NS.Proto.TCP_RTO - 1);
+  assert(warned && conn.state === 'SYN_SENT', 'SYN 收到网络不可达后继续等待');
+  Router1.addRoute('192.168.2.0', '255.255.255.0', '10.0.0.2');
+  Router2.addRoute('192.168.1.0', '255.255.255.0', '10.0.0.1');
+  NS.Engine.advanceUntilIdle(10000);
+  assert(opened && !error && conn.state === 'ESTABLISHED', '修复路由后原连接可在重试中完成握手');
+
+  let detail;
+  const hostMissing = tcp.open(PC1, '192.168.2.99', 23, { onNetworkError(info) { detail = info; } });
+  NS.Engine.advanceUntilIdle(2500);
+  assert(detail?.type === 3 && detail.code === 1 && hostMissing.state === 'SYN_SENT', '路由器的 ARP 失败通知目标主机不可达');
+  tcp.abort(hostMissing, true);
+
+  Router1.addRoute('172.16.0.0', '255.255.0.0', '10.0.0.2');
+  Router2.addRoute('172.16.0.0', '255.255.0.0', '10.0.0.1');
+  detail = null;
+  const looping = tcp.open(PC1, '172.16.1.10', 23, { onNetworkError(info) { detail = info; } });
+  NS.Engine.advanceUntilIdle(NS.Proto.TCP_RTO - 1);
+  assert(detail?.type === 11 && looping.state === 'SYN_SENT' && conn.state === 'ESTABLISHED', '路由环路报告 TTL 超时，其他连接不受影响');
+}
+
+section('T23 中断命令会停止未发送的探测和 HTTP 重传');
+{
+  for (const command of ['ping -t', 'tracert']) {
+    const { PC1 } = loadLab('lab-arp');
+    let ended = 0, echoFrames = 0;
+    const off = NS.Bus.on('frame', rec => { if (rec.frame.payload.payload?.type === 8) echoFrames++; });
+    const job = NS.Commands.execute(`${command} 192.168.1.20`, { dev: PC1, print() {}, endJob() { ended++; } });
+    job.abort();
+    NS.Engine.advanceUntilIdle(10000);
+    off();
+    assert(ended === 1 && !PC1.icmpCbs.size && echoFrames === 0, `${command} 在 ARP 等待期间中断后不会再发探测`);
+  }
+  const { PC1, Server1 } = loadLab('lab-tcp');
+  const tcp = NS.Proto.tcp;
+  const output = [];
+  let ended = 0;
+  const job = NS.Commands.execute('http 192.168.1.20', { dev: PC1, print: text => output.push(text), endJob() { ended++; } });
+  NS.Engine.advanceUntilIdle(44);
+  assert(tcp.connsOf(PC1)[0]?.state === 'ESTABLISHED' && tcp.connsOf(Server1)[0]?.state === 'ESTABLISHED',
+    '取消前 HTTP 已连接，服务器响应在途');
+  job.abort();
+  const printed = output.length;
+  NS.Engine.advanceUntilIdle(10000);
+  assert(ended === 1 && !tcp.connsOf(PC1).length && !tcp.connsOf(Server1).length && output.length === printed &&
+    !NS.Logger.entries.some(entry => entry.msg.includes('重传')), '中断 HTTP 清理双方连接，停止重传及后续输出');
+}
+{
+  const { PC1, Server1 } = loadLab('lab-tcp');
+  const tcp = NS.Proto.tcp;
+  const job = NS.Commands.execute('http 192.168.1.20', { dev: PC1, print() {}, endJob() {} });
+  NS.Engine.advanceUntilIdle(24);
+  assert(tcp.connsOf(PC1)[0]?.state === 'SYN_SENT' && tcp.connsOf(Server1)[0]?.state === 'SYN_RCVD', '取消前 SYN+ACK 在途');
+  job.abort();
+  NS.Engine.advanceUntilIdle(10000);
+  assert(!tcp.connsOf(PC1).length && !tcp.connsOf(Server1).length && !NS.Logger.entries.some(entry => entry.msg.includes('重传')),
+    '中断握手后迟到的 SYN+ACK 触发 RST，服务器释放半开连接');
+}
+
+section('T24 tracert 显示实测往返时间和未发送的探测');
+{
+  for (const dropFirst of [false, true]) {
+    const { PC1 } = loadLab('lab-route');
+    let dropped = false;
+    const output = [];
+    droppingFrames((dev, frame) => {
+      if (dropFirst && !dropped && frame.payload.payload?.type === 3) { dropped = true; return true; }
+      return false;
+    }, () => {
+      NS.Commands.execute('tracert 192.168.2.10', { dev: PC1, print: text => output.push(text), endJob() {} });
+      NS.Engine.advanceUntilIdle(10000);
+    });
+    const hops = output.map(line => line.trim().replace(/\s+/g, ' '));
+    if (!dropFirst) {
+      assert(hops.includes('1 16 ms 8 ms 8 ms 192.168.1.1'), 'TTL 超时回包显示实际延迟，包括首次 ARP 的等待');
+    }
+    const probeTimes = dropFirst ? '* 8 ms —' : '8 ms — —';
+    assert(hops.some(line => line.startsWith(`2 ${probeTimes} 192.168.1.1`) && line.includes('无法访问目标网络')),
+      dropFirst ? '不可达前保留已超时的探测，余下未发送的探测显示 —' : '首次探测即不可达时只显示一次实测时间');
+  }
+}
+
+section('T25 arp -a 按 IPv4 数值排序');
+{
+  const { PC1 } = loadLab('lab-arp');
+  PC1.setIfConfig('eth0', { mask: '255.255.0.0' });
+  for (const ip of ['192.168.1.100', '192.168.10.1', '192.168.1.20', '192.168.2.1']) {
+    NS.Proto.arpLearn(PC1, 'eth0', ip, '00:50:56:20:00:10');
+  }
+  const output = [];
+  NS.Commands.execute('arp -a', { dev: PC1, print: text => output.push(text) });
+  const ips = output.join('').split('\n').filter(line => /^  \d/.test(line)).map(line => line.trim().split(/\s+/)[0]);
+  assert(ips.join(',') === '192.168.1.20,192.168.1.100,192.168.2.1,192.168.10.1', '同时按主机位和网段的数值排序');
+}
+
 assert(runtimeErrors.length === 0, '协议事件和命令执行无被捕获的运行时异常');
 
 /* ─────────── 输出 ─────────── */

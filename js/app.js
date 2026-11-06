@@ -40,7 +40,7 @@
         box.appendChild(b);
       } else if (name === 'log') {
         const b = document.createElement('button');
-        b.textContent = NS.t('log.cleared') === NS.t('log.cleared') ? (NS.I18N.lang === 'zh' ? '清空日志' : 'Clear log') : '';
+        b.textContent = NS.t('log.clear');
         b.addEventListener('click', () => { NS.Logger.clear(); $('log-area').innerHTML = ''; });
         box.appendChild(b);
       }

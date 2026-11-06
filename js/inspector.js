@@ -28,6 +28,18 @@
     if (placeholder) i.placeholder = placeholder;
     return i;
   }
+  function maskSelect(current, { compact = false, allowEmpty = true } = {}) {
+    const select = document.createElement('select');
+    select.setAttribute('aria-label', t('insp.mask'));
+    if (allowEmpty) select.add(new Option('—', ''));
+    const currentPrefix = current ? NS.IP.maskLen(current) : null;
+    for (let prefix = 32; prefix >= 0; prefix--) {
+      const mask = NS.IP.str(NS.IP.maskOf(prefix));
+      select.add(new Option(compact ? `/${prefix}` : mask, prefix === currentPrefix ? current : mask));
+    }
+    select.value = current;
+    return select;
+  }
   function btn(txt, cls, onClick) {
     const b = document.createElement('button');
     b.className = 'insp-btn ' + (cls || '');
@@ -114,15 +126,11 @@
       dev.interfaces.forEach(ifce => {
         const macIn = inputEl(NS.macWin(ifce.mac), { readonly: true });
         const ipIn = inputEl(ifce.ip, { placeholder: '192.168.1.10' });
-        const maskSel = document.createElement('select');
-        ['255.255.255.0', '255.255.255.128', '255.255.255.192', '255.255.0.0', '255.255.128.0', '255.0.0.0', ''].forEach(m => {
-          const o = document.createElement('option'); o.value = m; o.textContent = m || '—'; maskSel.appendChild(o);
-        });
-        maskSel.value = ifce.mask || '';
+        const maskSel = maskSelect(ifce.mask);
         const gwIn = inputEl(ifce.gw, { placeholder: '192.168.1.1' });
         const apply = () => {
           const err = dev.setIfConfig(ifce.name, { ip: ipIn.value.trim(), mask: maskSel.value, gw: gwIn.value.trim() });
-          if (err) { NS.toast && NS.toast(t('toast.badIp'), 'err'); ipIn.value = ifce.ip; gwIn.value = ifce.gw; }
+          if (err) { NS.toast && NS.toast(t('toast.badIp'), 'err'); ipIn.value = ifce.ip; maskSel.value = ifce.mask; gwIn.value = ifce.gw; }
           else NS.toast && NS.toast(dev.name + ' ' + ifce.name + ' OK', 'ok');
         };
         [ipIn, maskSel, gwIn].forEach(el => el.addEventListener('change', apply));
@@ -154,12 +162,10 @@
       dev.interfaces.forEach(ifce => {
         const tr = document.createElement('tr');
         const ipIn = inputEl(ifce.ip, { placeholder: '未配置' }); ipIn.style.width = '92px'; ipIn.style.fontSize = '11px';
-        const maskSel = document.createElement('select'); maskSel.style.fontSize = '11px';
-        ['255.255.255.0', '255.255.255.252', '255.255.0.0'].forEach(m => { const o = document.createElement('option'); o.value = m; o.textContent = m.replace('255.255.', '/'); maskSel.appendChild(o); });
-        maskSel.value = ifce.mask || '';
+        const maskSel = maskSelect(ifce.mask, { compact: true }); maskSel.style.fontSize = '11px';
         const apply = () => {
           const err = dev.setIfConfig(ifce.name, { ip: ipIn.value.trim(), mask: maskSel.value });
-          if (err) { NS.toast && NS.toast(t('toast.badIp'), 'err'); ipIn.value = ifce.ip; }
+          if (err) { NS.toast && NS.toast(t('toast.badIp'), 'err'); ipIn.value = ifce.ip; maskSel.value = ifce.mask; }
         };
         ipIn.addEventListener('change', apply); maskSel.addEventListener('change', apply);
         tr.innerHTML = `<td>${esc(ifce.name)}<br><span style="color:#8a94a6">${esc(NS.macWin(ifce.mac))}</span></td>`;
@@ -185,8 +191,8 @@
         rt.appendChild(tr);
       });
       const dIn = inputEl('', { placeholder: '192.168.2.0', width: 90 }); dIn.style.fontSize = '11px';
-      const mSel = document.createElement('select'); mSel.style.fontSize = '11px';
-      ['255.255.255.0', '255.255.0.0', '0.0.0.0'].forEach(m => { const o = document.createElement('option'); o.value = m; o.textContent = m === '0.0.0.0' ? '默认' : m.replace('255.255.', '/'); mSel.appendChild(o); });
+      const mSel = maskSelect('255.255.255.0', { compact: true, allowEmpty: false }); mSel.style.fontSize = '11px';
+      mSel.querySelector('option[value="0.0.0.0"]').textContent = t('insp.defaultRoute');
       const nIn = inputEl('', { placeholder: '10.0.0.2', width: 90 }); nIn.style.fontSize = '11px';
       const addBtn = btn(t('insp.addRoute'), '', () => {
         if (!dev.addRoute(dIn.value.trim(), mSel.value, nIn.value.trim())) NS.toast && NS.toast(t('insp.badRoute'), 'err');

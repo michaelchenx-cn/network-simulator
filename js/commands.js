@@ -10,8 +10,6 @@
   const P = () => NS.Proto;
   const IP = NS.IP;
 
-  let echoSeq = 0;
-  const nextEchoId = () => (++echoSeq + 0x1000);
   const fmtMs = (ms) => (ms < 1 ? '<1ms' : `${Math.max(1, Math.round(ms))}ms`);
 
   /* ───── ipconfig ───── */
@@ -74,7 +72,8 @@
     const ttl = flags.i && flags.i > 0 ? Math.min(flags.i, 255) : 128;
 
     ctx.print(L(`\n正在 ping ${dst} 具有 ${size} 字节的数据:`, `\nPinging ${dst} with ${size} bytes of data:`));
-    const st = { sent: 0, recv: 0, times: [], done: false, aborted: false };
+    const st = { sent: 0, recv: 0, times: [], done: false };
+    let nextTimer, cancelProbe;
 
     const stats = () => {
       const zh = NS.I18N.lang === 'zh';
@@ -92,7 +91,7 @@
       ctx.print(out.join('\n') + '\n');
     };
 
-    const oneResult = (res, k) => {
+    const oneResult = (res) => {
       const zh = NS.I18N.lang === 'zh';
       if (res.kind === 'reply') {
         st.recv++; st.times.push(res.ms);
@@ -111,26 +110,29 @@
       }
     };
 
-    let k = 0;
+    const finish = () => {
+      if (st.done) return;
+      st.done = true;
+      E.cancel(nextTimer);
+      cancelProbe?.();
+      stats();
+      ctx.endJob();
+    };
+
     const next = () => {
       if (st.done) return;
-      st.sent++; k++;
-      P().icmpEcho(ctx.dev, dst, { echoId: nextEchoId(), seq: k, ttl, size, timeout: P().ICMP_TIMEOUT }, (res) => {
+      st.sent++;
+      cancelProbe = P().icmpEcho(ctx.dev, dst, { seq: st.sent, ttl, size }, (res) => {
         if (st.done) return;
-        oneResult(res, k);
-        if (!flags.t && k >= n) { st.done = true; stats(); ctx.endJob(); return; }
-        E.schedule(P().PING_INTERVAL, next, 'ping-next');
+        oneResult(res);
+        if (!flags.t && st.sent >= n) { finish(); return; }
+        nextTimer = E.schedule(P().PING_INTERVAL, next, 'ping-next');
       });
     };
     if (!E.running) ctx.print(L('（仿真已暂停：按 ▶ 继续后报文才会收发）', '(Simulation paused: press \u25B6 to resume packet flow)'), 't-dim');
     next();
 
-    return {
-      abort() {
-        if (st.done) return;
-        st.done = true; stats(); ctx.endJob();
-      },
-    };
+    return { abort: finish };
   }
 
   /* ───── tracert ───── */
@@ -146,14 +148,14 @@
     ctx.print(zh ? `通过最多 ${maxHops} 个跃点跟踪到 ${dst} 的路由:` : `Tracing route to ${dst} over a maximum of ${maxHops} hops:`);
 
     const st = { done: false };
-    let hop = 1;
+    let hopTimer, cancelProbe;
 
     const probe = (h, trial, times, ipOfHop, doneHop) => {
       if (st.done) return;
-      P().icmpEcho(ctx.dev, dst, { echoId: nextEchoId(), seq: h * 10 + trial, ttl: h, timeout: 1500 }, (res) => {
+      cancelProbe = P().icmpEcho(ctx.dev, dst, { seq: h * 10 + trial, ttl: h, timeout: 1500 }, (res) => {
         if (st.done) return;
         if (res.kind === 'reply' || res.kind === 'tlexceeded') {
-          times.push(res.ms || 1);
+          times.push(res.ms);
           ipOfHop = res.from;
           nextTrial();
         } else if (res.kind === 'timeout') {
@@ -161,12 +163,13 @@
         } else if (res.kind === 'unreachable') {
           const w = res.code === 1 ? (zh ? '报告: 无法访问目标主机。' : 'Reports: Destination host unreachable.')
                                    : (zh ? '报告: 无法访问目标网络。' : 'Reports: Destination net unreachable.');
-          printHop(h, [1, 1, 1], `${res.from} ${w}`, true);
-          finish(true);
+          times.push(res.ms);
+          printHop(h, times, `${res.from} ${w}`);
+          finish();
           return;
         } else if (res.kind === 'noroute') {
           ctx.print(zh ? 'PING: 传输失败。常见故障。' : 'PING: transmit failed. General failure.', 't-err');
-          finish(true);
+          finish();
           return;
         }
         function nextTrial() {
@@ -176,16 +179,25 @@
       });
     };
 
-    const fmtTime = (t) => (t == null ? '  *       ' : String(Math.max(1, Math.round(t))).padStart(4) + ' ms  ');
-    const printHop = (h, times, ip, done) => {
-      const line = [String(h).padStart(3), fmtTime(times[0]), fmtTime(times[1]), fmtTime(times[2]), ip].join(' ');
-      ctx.print(line, done ? undefined : undefined);
+    const fmtTime = (t) => {
+      if (t === null) return '  *       ';
+      if (t === undefined) return '  —       ';
+      return (t < 1 ? '<1' : String(Math.round(t))).padStart(4) + ' ms  ';
     };
-    const finish = (early) => {
+    const printHop = (h, times, ip, style) => {
+      ctx.print([String(h).padStart(3), fmtTime(times[0]), fmtTime(times[1]), fmtTime(times[2]), ip].join(' '), style);
+    };
+    const finish = () => {
       if (st.done) return;
-      st.done = true;
+      stop();
       ctx.print('');
       ctx.print(zh ? '跟踪完成。' : 'Trace complete.');
+    };
+    const stop = () => {
+      if (st.done) return;
+      st.done = true;
+      E.cancel(hopTimer);
+      cancelProbe?.();
       ctx.endJob();
     };
 
@@ -195,16 +207,14 @@
       probe(h, 1, [], null, (times, ip) => {
         const reached = ip === dst;
         if (ip) printHop(h, times, ip);
-        else {
-          ctx.print([String(h).padStart(3), '  *       ', '  *       ', '  *       ', zh ? '请求超时。' : 'Request timed out.'].join(' '), 't-err');
-        }
+        else printHop(h, times, zh ? '请求超时。' : 'Request timed out.', 't-err');
         if (reached) { finish(); return; }
-        E.schedule(60, () => runHop(h + 1), 'tracert-hop');
+        hopTimer = E.schedule(60, () => runHop(h + 1), 'tracert-hop');
       });
     };
     if (!E.running) ctx.print(L('（仿真已暂停：按 ▶ 继续后报文才会收发）', '(Simulation paused: press \u25B6 to resume packet flow)'), 't-dim');
     runHop(1);
-    return { abort() { if (!st.done) { st.done = true; ctx.endJob(); } } };
+    return { abort: stop };
   }
 
   /* ───── arp ───── */
@@ -224,7 +234,7 @@
       rows.push(zh ? `接口: ${ifce.ip} --- 0x3` : `Interface: ${ifce.ip} --- 0x3`);
       rows.push(zh ? '  Internet 地址         物理地址              类型'
                    : '  Internet Address      Physical Address      Type');
-      [...cache.entries()].sort().forEach(([ip, e]) => {
+      [...cache.entries()].sort(([a], [b]) => IP.parse(a) - IP.parse(b)).forEach(([ip, e]) => {
         rows.push(`  ${ip.padEnd(20)}${NS.macWin(e.mac).padEnd(22)}${zh ? '动态' : 'dynamic'}`);
       });
     });
@@ -257,11 +267,14 @@
     if (sub === 'add' || sub === 'delete') {
       if (dev.type !== 'router' && dev.type !== 'pc' && dev.type !== 'server') return null;
       if (sub === 'add') {
-        const dest = argv[1], mask = (argv[2] || '').toLowerCase() === 'mask' ? argv[3] : '255.255.255.255';
-        const nhIdx = (argv[2] || '').toLowerCase() === 'mask' ? 4 : 2;
-        const nh = argv[nhIdx] && !/^mask$/i.test(argv[nhIdx]) ? argv[nhIdx] : argv[argv.length - 1];
-        if (dev.addRoute(dest, mask, nh)) ctx.print(zh ? ' 操作完成!' : ' Manipulated route successfully!');
-        else ctx.print(zh ? '路由添加失败: 参数不正确。' : 'The route addition failed: The parameter is incorrect.', 't-err');
+        const hasMask = /^mask$/i.test(argv[2]);
+        const dest = argv[1], mask = hasMask ? argv[3] : '255.255.255.255';
+        const nextHop = argv[hasMask ? 4 : 2];
+        if (argv.length === (hasMask ? 5 : 3) && dev.addRoute(dest, mask, nextHop)) {
+          ctx.print(zh ? ' 操作完成!' : ' Manipulated route successfully!');
+        } else {
+          ctx.print(zh ? '路由添加失败，参数不正确。' : 'Route addition failed because a parameter is incorrect.', 't-err');
+        }
       } else {
         const dest = argv[1];
         const i = (dev.staticRoutes || []).findIndex(r => r.dest === dest);
@@ -335,6 +348,32 @@
     return null;
   }
 
+  function tcpErrorHandlers(ctx, finish, refusedMessage) {
+    const describeIcmp = ({ type, code, from }) => {
+      if (type === 11) return L(`${from} 报告 TTL 在传输中过期。`, `${from} reported that the TTL expired in transit.`);
+      if (code === 1) return L(`${from} 报告目标主机不可达。`, `${from} reported that the destination host is unreachable.`);
+      return L(`${from} 报告目标网络不可达。`, `${from} reported that the destination network is unreachable.`);
+    };
+    return {
+      onNetworkError(detail) {
+        ctx.print(describeIcmp(detail) + L('正在重试。', ' Retrying.'), 't-dim');
+      },
+      onErr(reason, detail) {
+        let message;
+        switch (reason) {
+          case 'refused': message = refusedMessage; break;
+          case 'noroute': message = L('连接失败，本机没有到目标的路由。', 'Connection failed. This device has no route to the destination.'); break;
+          case 'badgw': message = L('连接失败，默认网关不在本机子网内。', 'Connection failed. The default gateway is outside the local subnet.'); break;
+          case 'icmp': message = describeIcmp(detail) + L('重试后连接已关闭。', ' The connection closed after retries.'); break;
+          case 'reset': message = L('连接被重置。', 'Connection reset.'); break;
+          default: message = L('连接超时，已关闭。', 'Connection timed out and was closed.');
+        }
+        ctx.print(message, 't-err');
+        finish();
+      },
+    };
+  }
+
   /* ───── telnet ───── */
   function telnetCmd(ctx, argv) {
     const zh = NS.I18N.lang === 'zh';
@@ -346,13 +385,20 @@
     const job = {
       wantsInput: true,
       onLine(line) {
+        if (conn.state !== 'ESTABLISHED') {
+          const message = conn.state === 'SYN_SENT'
+            ? L('正在建立连接，请稍候。', 'Connecting. Please wait.')
+            : L('连接正在关闭。', 'The connection is closing.');
+          ctx.print(message, 't-dim');
+          return;
+        }
         const t = line.trim();
         if (t.toLowerCase() === 'quit') {
           conn.send('quit');
           ctx.print(zh ? '（正在断开连接…）' : '(closing connection...)', 't-dim');
         } else if (t) conn.send(t + '\r\n');
       },
-      abort() { finish(); conn && P().tcp.abort(conn, true); },
+      abort() { finish(); P().tcp.abort(conn, true); },
     };
     const finish = () => { if (!finished) { finished = true; ctx.endJob(); } };
 
@@ -366,11 +412,7 @@
       },
       onPeerFin(c) { c.close(); },
       onClose() { ctx.print(zh ? '连接已关闭。' : 'Connection closed.', 't-dim'); finish(); },
-      onErr(m) {
-        if (m === 'refused') ctx.print(zh ? `连接失败: 目标端口 ${port} 未开放，连接被拒绝。` : `Connect failed: connection refused (port ${port} not open).`, 't-err');
-        else ctx.print(zh ? '连接超时，已关闭。' : 'Connection timed out and was closed.', 't-err');
-        finish();
-      },
+      ...tcpErrorHandlers(ctx, finish, L(`目标端口 ${port} 未开放，连接被拒绝。`, `Connection refused. Port ${port} is not open.`)),
     });
     return job;
   }
@@ -383,7 +425,7 @@
     if (!E.running) ctx.print(L('（仿真已暂停：按 ▶ 继续后报文才会收发）', '(Simulation paused: press \u25B6 to resume packet flow)'), 't-dim');
     let finished = false;
     const finish = () => { if (!finished) { finished = true; ctx.endJob(); } };
-    P().tcp.open(ctx.dev, dst, 80, {
+    const conn = P().tcp.open(ctx.dev, dst, 80, {
       onOpen(conn) {
         ctx.print(zh ? `已连接到 ${dst}:80，发送 HTTP GET 请求…` : `Connected to ${dst}:80, sending HTTP GET...`, 't-info');
         conn.send(`GET / HTTP/1.1\r\nHost: ${dst}\r\n\r\n`);
@@ -391,13 +433,9 @@
       onData(c, d) { ctx.print(String(d).replace(/\r/g, '\n'), 't-ok'); },
       onPeerFin(c) { c.close(); },
       onClose() { ctx.print(zh ? '\n连接已关闭。' : '\nConnection closed.', 't-dim'); finish(); },
-      onErr(m) {
-        if (m === 'refused') ctx.print(zh ? '连接失败: 80 端口未开放（服务器 HTTP 服务未启用？）' : 'Connect failed: port 80 not open (HTTP service disabled?)', 't-err');
-        else ctx.print(zh ? '连接超时，已关闭。' : 'Connection timed out and was closed.', 't-err');
-        finish();
-      },
+      ...tcpErrorHandlers(ctx, finish, L('80 端口未开放，请检查服务器的 HTTP 服务。', 'Port 80 is not open. Check the server’s HTTP service.')),
     });
-    return { abort() { finish(); } };
+    return { abort() { finish(); P().tcp.abort(conn, true); } };
   }
 
   /* ───── 帮助 ───── */
