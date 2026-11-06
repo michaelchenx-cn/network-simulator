@@ -40,6 +40,7 @@
   NS.Logger = Logger;
 
   /* ── 离散事件引擎 ── */
+  const earlierEvent = (a, b) => a.t < b.t || (a.t === b.t && a.seq < b.seq);
   const Engine = {
     time: 0,        // 仿真时间（毫秒）
     speed: 1,
@@ -57,7 +58,7 @@
       let i = H.length - 1;
       while (i > 0) {                       // 上滤
         const p = (i - 1) >> 1;
-        if (H[p].t <= H[i].t) break;
+        if (!earlierEvent(H[i], H[p])) break;
         [H[p], H[i]] = [H[i], H[p]]; i = p;
       }
       return h;
@@ -75,8 +76,8 @@
         for (;;) {                          // 下滤
           const l = 2 * i + 1, r = l + 1;
           let m = i;
-          if (l < H.length && H[l].t < H[m].t) m = l;
-          if (r < H.length && H[r].t < H[m].t) m = r;
+          if (l < H.length && earlierEvent(H[l], H[m])) m = l;
+          if (r < H.length && earlierEvent(H[r], H[m])) m = r;
           if (m === i) break;
           [H[m], H[i]] = [H[i], H[m]]; i = m;
         }

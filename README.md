@@ -14,9 +14,9 @@
 |---|---|
 | 以太网 | 帧封装、MAC 寻址、广播 |
 | ARP | 缓存查询 → 广播请求（交换机泛洪）→ 单播应答 → 缓存学习，`arp -a` 可查 |
-| IPv4 | 最长前缀匹配（直连 + 静态路由）、TTL 逐跳递减、跨网段转发时 MAC 重封装 / IP 端到端不变 |
+| IPv4 | 最长前缀匹配（直连 + 静态路由）、本机 IP 与 127/8 回环通信、TTL 逐跳递减、跨网段转发时 MAC 重封装 / IP 端到端不变 |
 | ICMP | Echo 请求/应答、超时（tracert 原理）、目标不可达（net/host unreachable） |
-| TCP | 完整状态机：三次握手、四次挥手、TIME_WAIT(2MSL)、重传、RST（端口未监听） |
+| TCP | 三次握手、四次挥手、TIME_WAIT(2MSL)、未确认报文重传、按序交付与重复数据去重、重传耗尽后关闭、RST（端口未监听） |
 
 ### 命令行终端（双击设备打开，仿 Windows 输出，中/英可切换）
 ```
@@ -25,7 +25,7 @@ ping [-n N | -t | -i TTL] <IP>     连通性测试（先 ARP 后 ICMP，可观�
 tracert <IP>         逐跳跟踪（TTL 递增 + 路由器回 ICMP 超时）
 arp -a | arp -d      查看 / 清空 ARP 缓存
 netstat [-an]        TCP 连接与状态（SYN_SENT / ESTABLISHED / TIME_WAIT …）
-route print|add|delete    路由表管理
+route print|add|delete    路由表管理（PC、服务器、路由器）
 telnet <IP> [端口]   建立 TCP 会话（观察握手 / 挥手 / 回显交互）
 http <IP>            模拟浏览器：握手 → GET → 200 OK → 服务器挥手
 show ip route / show arp / show mac     路由器 / 交换机视图
@@ -50,7 +50,8 @@ cls / help / Ctrl+C（中断 ping -t、tracert、telnet）
 
 ### 其他
 - 中 / EN 一键切换（界面、实验指导、终端输出全量双语；终端输出分别仿真中文版/英文版 Windows）
-- 拓扑导出 / 导入 JSON；浏览器自动保存
+- 拓扑导出 / 导入 JSON，校验失败时保留当前画布和仿真状态，兼容已有版本 1 导出文件
+- 拓扑及 IP、静态路由、服务开关、电源、链路参数修改后约 0.8 秒自动保存到当前浏览器
 
 ## 快速开始
 
@@ -85,6 +86,7 @@ js/
   labs.js           预置实验
   app.js            启动装配
 tests/run.js        引擎自动化测试（Node，无 DOM）
+tests/browser.py    可选浏览器回归检查（Python Playwright）
 ```
 
 ## 自动化测试
@@ -93,6 +95,22 @@ tests/run.js        引擎自动化测试（Node，无 DOM）
 node tests/run.js
 ```
 覆盖：同网段 ping（ARP 先行）、关机超时、跨路由器（缺路由不可达 / 单边路由回程丢 / 双向通 + TTL 递减）、TTL=1 超时（tracert 原理）、TCP 握手三次序 / 挥手 / TIME_WAIT / RST 拒绝、错误掩码、断链恢复、交换机泛洪与学习。
+
+回归检查还覆盖本机与回环通信、主机静态路由的保存恢复、最长前缀匹配、各跳抓包 TTL、导入失败保护、TCP 握手 ACK / 数据 / HTTP 响应 / 关闭 ACK 丢失、重复报文及同时关闭。丢包用确定性故障注入复现。
+
+浏览器检查使用独立临时浏览器会话，验证抓包显示与过滤、逐层解码、自动保存、导入文本安全、设备删除和实际终端操作。测试环境需安装 Python Playwright 和 Chromium。
+
+```bash
+python3 -m pip install playwright
+python3 -m playwright install chromium
+python3 tests/browser.py
+```
+
+也可通过 `--browser-executable` 指定已安装的 Chrome/Chromium。macOS 示例命令如下。
+
+```bash
+python3 tests/browser.py --browser-executable "/Applications/Google Chrome.app/Contents/MacOS/Google Chrome"
+```
 
 ## 教学建议
 

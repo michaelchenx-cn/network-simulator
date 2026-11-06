@@ -8,7 +8,8 @@
     const box = $('toast-container');
     const d = document.createElement('div');
     d.className = `toast toast-${type}`;
-    d.innerHTML = msg;
+    d.textContent = msg;
+    d.style.whiteSpace = 'pre-line';
     box.appendChild(d);
     setTimeout(() => { d.style.opacity = '0'; d.style.transition = 'opacity .3s'; setTimeout(() => d.remove(), 320); }, duration);
   };
@@ -236,6 +237,7 @@
         }, 800);
       };
       NS.Bus.on('world:changed', autosave);
+      NS.Bus.on('world:cleared', autosave);
       NS.Bus.on('topology:touched', autosave);
       window.addEventListener('beforeunload', () => {
         try { localStorage.setItem('ns.topo', JSON.stringify(NS.saveTopology())); } catch (e) {}

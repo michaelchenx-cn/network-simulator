@@ -258,7 +258,7 @@
       if (dev.type !== 'router' && dev.type !== 'pc' && dev.type !== 'server') return null;
       if (sub === 'add') {
         const dest = argv[1], mask = (argv[2] || '').toLowerCase() === 'mask' ? argv[3] : '255.255.255.255';
-        const nhIdx = argv.indexOf('mask') === 2 ? 4 : 2;
+        const nhIdx = (argv[2] || '').toLowerCase() === 'mask' ? 4 : 2;
         const nh = argv[nhIdx] && !/^mask$/i.test(argv[nhIdx]) ? argv[nhIdx] : argv[argv.length - 1];
         if (dev.addRoute(dest, mask, nh)) ctx.print(zh ? ' 操作完成!' : ' Manipulated route successfully!');
         else ctx.print(zh ? '路由添加失败: 参数不正确。' : 'The route addition failed: The parameter is incorrect.', 't-err');
@@ -368,7 +368,7 @@
       onClose() { ctx.print(zh ? '连接已关闭。' : 'Connection closed.', 't-dim'); finish(); },
       onErr(m) {
         if (m === 'refused') ctx.print(zh ? `连接失败: 目标端口 ${port} 未开放，连接被拒绝。` : `Connect failed: connection refused (port ${port} not open).`, 't-err');
-        else ctx.print(zh ? '连接尝试失败（超时）。' : 'Connection attempt failed (timeout).', 't-err');
+        else ctx.print(zh ? '连接超时，已关闭。' : 'Connection timed out and was closed.', 't-err');
         finish();
       },
     });
@@ -393,7 +393,7 @@
       onClose() { ctx.print(zh ? '\n连接已关闭。' : '\nConnection closed.', 't-dim'); finish(); },
       onErr(m) {
         if (m === 'refused') ctx.print(zh ? '连接失败: 80 端口未开放（服务器 HTTP 服务未启用？）' : 'Connect failed: port 80 not open (HTTP service disabled?)', 't-err');
-        else ctx.print(zh ? '连接尝试失败（超时）。' : 'Connection attempt failed (timeout).', 't-err');
+        else ctx.print(zh ? '连接超时，已关闭。' : 'Connection timed out and was closed.', 't-err');
         finish();
       },
     });

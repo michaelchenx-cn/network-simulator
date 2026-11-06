@@ -317,7 +317,7 @@
         const ans = document.createElement('button');
         ans.textContent = NS.I18N.lang === 'zh' ? '显示答案' : 'Show answer';
         ans.addEventListener('click', () => {
-          NS.toast && NS.toast(pick(lab.answer), 'warn', 9000);
+          NS.toast && NS.toast(pick(lab.answer).replace(/<br\s*\/?>/gi, '\n'), 'warn', 9000);
         });
         actions.appendChild(ans);
       }

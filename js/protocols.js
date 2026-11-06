@@ -40,6 +40,7 @@
     network(ip, mask) { return IP.str((IP.parse(ip) & IP.parse(mask)) >>> 0); },
     BROADCAST: '255.255.255.255',
     isBroadcast(mac) { return mac === 'FF:FF:FF:FF:FF:FF'; },
+    isLoopback(ip) { return IP.valid(ip) && (IP.parse(ip) >>> 24) === 127; },
   };
   NS.IP = IP;
 
@@ -79,6 +80,7 @@
 
     /* 从 dev.outIf 发出一帧；返回 true 表示已上线 */
     tx(dev, outIf, frame) {
+      if (!dev.on || NS.world.devices.get(dev.id) !== dev) return false;
       if (!outIf || !outIf.linkId) { NS.log(`${dev.name}: ${outIf ? outIf.name : '?'} 没有链路，丢弃报文`, 'warn'); return false; }
       const link = NS.world.links.get(outIf.linkId);
       if (!link || !link.up) { NS.log(`${dev.name}: 链路断开，丢弃 ${frame.eth.type} 报文`, 'warn'); return false; }
@@ -97,7 +99,9 @@
       Bus.emit('flight', { id, linkId: link.id, frame, t0, t1, from: dev.id });
       Engine.schedule(link.delay, () => {
         Bus.emit('flight:end', id);
-        if (peer.on) peer.receiveFrame(frame, peer.getInterface(other.ifName));
+        if (peer.on && NS.world.devices.get(peer.id) === peer && NS.world.links.get(link.id) === link && link.up) {
+          peer.receiveFrame(frame, peer.getInterface(other.ifName));
+        }
       }, `tx ${frame.eth.type} ${dev.name}→${peer.name}`);
       return true;
     },
@@ -158,6 +162,7 @@
     arpInbound(dev, ifce, arp) {
       if (arp.op === 1 && arp.tpa === ifce.ip) {
         // 请求本接口 IP → 单播应答
+        this.arpLearn(dev, ifce.name, arp.spa, arp.sha);
         Net.tx(dev, ifce, Frames.arp(2, ifce.mac, ifce.ip, arp.sha, arp.spa));
       } else if (arp.op === 2 && arp.tpa === ifce.ip) {
         this.arpLearn(dev, ifce.name, arp.spa, arp.sha);
@@ -176,10 +181,8 @@
     /* ───── 路由决策 ───── */
     /* 主机路由：返回 {ifce, nextHop} | {err:'noroute'|'badgw'} */
     hostRoute(dev, dstIp) {
-      for (const ifce of dev.interfaces) {
-        if (!ifce.ip || !ifce.mask) continue;
-        if (IP.inSubnet(dstIp, ifce.ip, ifce.mask)) return { ifce, nextHop: dstIp };
-      }
+      const route = this.routerRoute(dev, dstIp);
+      if (!route.err) return route;
       const gwIf = dev.interfaces.find(ifce => ifce.gw);
       if (gwIf) {
         if (gwIf.ip && gwIf.mask && IP.inSubnet(gwIf.gw, gwIf.ip, gwIf.mask)) return { ifce: gwIf, nextHop: gwIf.gw };
@@ -190,27 +193,47 @@
 
     /* 路由器路由：直连 + 静态最长前缀匹配 */
     routerRoute(dev, dstIp) {
+      let best = null;
       for (const ifce of dev.interfaces) {
         if (!ifce.ip || !ifce.mask) continue;
-        if (IP.inSubnet(dstIp, ifce.ip, ifce.mask)) return { ifce, nextHop: dstIp };
+        const len = IP.maskLen(ifce.mask);
+        if (IP.inSubnet(dstIp, ifce.ip, ifce.mask) && (!best || len > best.len)) {
+          best = { ifce, nextHop: dstIp, len };
+        }
       }
-      let best = null;
       for (const r of (dev.staticRoutes || [])) {
         if (!IP.valid(r.dest) || !IP.validMask(r.mask) || !IP.valid(r.nh)) continue;
         if (!IP.inSubnet(dstIp, r.dest, r.mask)) continue;
         const len = IP.maskLen(r.mask);
-        if (!best || len > best.len) best = { ...r, len };
+        if (best && len <= best.len) continue;
+        const nhIf = dev.interfaces
+          .filter(ifce => ifce.ip && ifce.mask && IP.inSubnet(r.nh, ifce.ip, ifce.mask))
+          .sort((a, b) => IP.maskLen(b.mask) - IP.maskLen(a.mask))[0];
+        if (nhIf) best = { ifce: nhIf, nextHop: r.nh, len };
       }
-      if (best) {
-        const nhIf = dev.interfaces.find(ifce => ifce.ip && ifce.mask && IP.inSubnet(best.nh, ifce.ip, ifce.mask));
-        if (nhIf) return { ifce: nhIf, nextHop: best.nh };
-      }
-      return { err: 'noroute' };
+      return best || { err: 'noroute' };
+    },
+
+    localInterface(dev, ip) {
+      if (!IP.valid(ip)) return null;
+      if (IP.isLoopback(ip)) return { name: 'lo', ip, mac: '00:00:00:00:00:00' };
+      return dev.interfaces.find(ifce => ifce.ip === ip) || null;
     },
 
     /* ───── 发送 IP 包（主机与路由器共用入口） ─────
      * srcIf 可省略（自动选择）。opts.errCb 接收 'noroute'/'badgw'/'arptimeout'。 */
     sendIp(dev, dstIp, l4, opts = {}) {
+      if (!dev.on || NS.world.devices.get(dev.id) !== dev) return;
+      const localIf = this.localInterface(dev, dstIp);
+      if (localIf) {
+        const packet = Frames.ip(localIf.mac, localIf.mac, opts.srcIp || dstIp, dstIp,
+          opts.ttl ?? 128, l4.proto, l4).payload;
+        Engine.schedule(0, () => {
+          if (opts.cancelled && opts.cancelled()) return;
+          if (dev.on && NS.world.devices.get(dev.id) === dev) this.ipInbound(dev, localIf, packet);
+        }, 'local-ip');
+        return;
+      }
       const r = dev.type === 'router' ? this.routerRoute(dev, dstIp) : this.hostRoute(dev, dstIp);
       if (r.err) {
         NS.log(`${dev.name}: 无到 ${dstIp} 的路由`, 'warn');
@@ -219,6 +242,7 @@
       }
       const srcIp = opts.srcIp || (r.ifce.ip || '0.0.0.0');
       this.arpResolve(dev, r.ifce, r.nextHop, (err, mac) => {
+        if (opts.cancelled && opts.cancelled()) return;
         if (err) { if (opts.errCb) opts.errCb('arptimeout'); return; }
         Net.tx(dev, r.ifce, Frames.ip(r.ifce.mac, mac, srcIp, dstIp, opts.ttl == null ? 128 : opts.ttl, l4.proto, l4));
       });
@@ -255,7 +279,7 @@
     icmpInbound(dev, ifce, ipPkt, icmp) {
       const ip = ipPkt.ip;
       if (icmp.type === 8) {                       // echo request → 回复
-        this.sendIp(dev, ip.src, Frames.icmp(0, 0, icmp.echoId, icmp.seq, icmp.dataLen), { ttl: 128 });
+        this.sendIp(dev, ip.src, Frames.icmp(0, 0, icmp.echoId, icmp.seq, icmp.dataLen), { ttl: 128, srcIp: ip.dst });
       } else if (icmp.type === 0 || icmp.type === 11 || icmp.type === 3) {
         const entry = dev.icmpCbs && dev.icmpCbs.get(icmp.echoId);
         if (!entry) return;
@@ -268,7 +292,7 @@
     /* ───── TCP ───── */
     tcp: {
       /* conn: {id, dev, side:'active'|'passive', localIp, localPort, remoteIp, remotePort,
-       *        state, seq, ack, app:{onOpen,onData,onClose,onErr}, _rt:{seg,timer,retries}, _timers:[]} */
+       *        state, seq, ack, app:{onOpen,onData,onClose,onErr}, _unacked:[], _timeWaitTimer} */
       _cid: 1,
 
       listenersOf(dev) { if (!dev._listeners) dev._listeners = new Map(); return dev._listeners; },
@@ -283,8 +307,8 @@
       /* 主动打开（客户端 connect） */
       open(dev, dstIp, dstPort, app) {
         const conns = this.connsOf(dev);
-        const port = (dev._eph || 1024) + Math.floor(Math.random() * 200); dev._eph = (dev._eph || 1324);
-        const srcIf = dev.interfaces.find(i => i.ip);
+        const route = dev.type === 'router' ? Proto.routerRoute(dev, dstIp) : Proto.hostRoute(dev, dstIp);
+        const srcIf = Proto.localInterface(dev, dstIp) || route.ifce || dev.interfaces.find(i => i.ip);
         const conn = {
           id: this._cid++, dev, side: 'active',
           localIp: srcIf ? srcIf.ip : '0.0.0.0', localPort: 1325 + (dev._ephSeq = (dev._ephSeq || 0) + 1),
@@ -327,58 +351,75 @@
       },
 
       abort(conn, silent) {                         // 本地放弃（关机 / Ctrl+C）
-        this._clearRt(conn);
         this._drop(conn);
         if (!silent && conn.app.onErr) conn.app.onErr('aborted');
         Bus.emit('device:changed', conn.dev.id);
       },
 
       _drop(conn) {
+        this._clearRt(conn);
+        Engine.cancel(conn._timeWaitTimer);
         const arr = this.connsOf(conn.dev);
         const i = arr.indexOf(conn); if (i >= 0) arr.splice(i, 1);
-        (conn._timers || []).forEach(Engine.cancel, Engine);
         conn.state = 'CLOSED';
       },
 
       _send(dev, conn, seg, retries) {
-        this._clearRt(conn);
+        const pending = conn._unacked = conn._unacked || [];
+        const length = seg.dataLen + Number(seg.flags.SYN) + Number(seg.flags.FIN);
+        const record = { seg, retries, timer: null, end: seg.seq + length, rto: Proto.TCP_RTO };
+        // 纯 ACK 不占序号，也不能取消其他未确认报文的重传。
+        if (length) pending.push(record);
         const emit = () => Proto.sendIp(dev, conn.remoteIp, seg, {
           srcIp: conn.localIp === '0.0.0.0' ? undefined : conn.localIp, ttl: 128,
+          cancelled: () => conn.state === 'CLOSED' || (length && !pending.includes(record)),
         });
-        /* 该段占用序号空间的末尾（SYN/FIN 各占 1，数据占 len）——用于判断 ACK 是否覆盖 */
-        const end = seg.seq + (seg.dataLen || 0) + (seg.flags.SYN ? 1 : 0) + (seg.flags.FIN ? 1 : 0);
-        conn._rt = { seg, emit, retries, timer: null, end };
+        record.emit = emit;
         const arm = () => {
-          if (!conn._rt || conn._rt.seg !== seg) return;
-          if (conn._rt.retries-- <= 0) {            // 重传耗尽：报告失败
-            this._clearRt(conn);
-            if (seg.flags.SYN && !seg.flags.ACK) {  // SYN 没有应答
-              conn.state = 'CLOSED';
-              if (conn.app.onErr) conn.app.onErr('timeout');
-              this._drop(conn);
-            }
+          if (!pending.includes(record) || conn.state === 'CLOSED') return;
+          if (record.retries-- <= 0) {
+            this._drop(conn);
+            NS.log(`${dev.name}: TCP 重传超时，连接关闭`, 'warn');
+            if (conn.app.onErr) conn.app.onErr('timeout');
             Bus.emit('device:changed', dev.id);
             return;
           }
           NS.log(`${dev.name}: 重传 ${this.segInfo(seg)}`, 'warn');
           emit();
-          conn._rt.timer = Engine.schedule(Proto.TCP_RTO * (3 - conn._rt.retries), arm, 'tcp-rto');
+          record.rto *= 2;
+          record.timer = Engine.schedule(record.rto, arm, 'tcp-rto');
         };
         emit();
-        conn._rt.timer = Engine.schedule(Proto.TCP_RTO, arm, 'tcp-rto');
+        if (length) record.timer = Engine.schedule(record.rto, arm, 'tcp-rto');
       },
 
-      _clearRt(conn) { if (conn && conn._rt) { Engine.cancel(conn._rt.timer); conn._rt = null; } },
+      _clearRt(conn) {
+        for (const record of (conn._unacked || [])) Engine.cancel(record.timer);
+        if (conn._unacked) conn._unacked.length = 0;
+      },
+
+      _acknowledge(conn, ack) {
+        const pending = conn._unacked || [];
+        for (let i = pending.length - 1; i >= 0; i--) {
+          if (pending[i].end <= ack) {
+            Engine.cancel(pending[i].timer);
+            pending.splice(i, 1);
+          }
+        }
+      },
+
+      _sendAck(conn) {
+        this._send(conn.dev, conn, Frames.tcp(conn.localPort, conn.remotePort, { ACK: 1 }, conn.seq, conn.ack), 0);
+      },
 
       _mslTimer(conn) {
-        conn._timers = conn._timers || [];
-        const t = Engine.schedule(2 * Proto.MSL, () => {
+        Engine.cancel(conn._timeWaitTimer);
+        conn._timeWaitTimer = Engine.schedule(2 * Proto.MSL, () => {
           NS.log(`${conn.dev.name}: TIME_WAIT 结束，连接关闭`, 'ok');
           this.historyOf(conn.dev).finClosed++;
           this._drop(conn);
           Bus.emit('device:changed', conn.dev.id);
         }, 'timewait');
-        conn._timers.push(t);
       },
 
       /* 应用视角的"连接已关闭"：己方 FIN 已被确认 / 被动端完成 LAST_ACK */
@@ -392,12 +433,12 @@
         const conns = this.connsOf(dev);
 
         /* 已有连接匹配 */
-        const conn = conns.find(c => c.remoteIp === ip.src && c.remotePort === seg.sport && c.localPort === seg.dport);
+        const conn = conns.find(c => c.localIp === ip.dst && c.remoteIp === ip.src && c.remotePort === seg.sport && c.localPort === seg.dport);
 
         if (seg.flags.RST) {
           if (conn) {
             conn.state = 'CLOSED';
-            this._clearRt(conn); this._drop(conn);
+            this._drop(conn);
             if (conn.app.onErr) conn.app.onErr('refused');
           }
           Bus.emit('device:changed', dev.id);
@@ -411,7 +452,7 @@
             if (svc) {
               const nconn = {
                 id: this._cid++, dev, side: 'passive',
-                localIp: ifce.ip, localPort: seg.dport, remoteIp: ip.src, remotePort: seg.sport,
+                localIp: ip.dst, localPort: seg.dport, remoteIp: ip.src, remotePort: seg.sport,
                 state: 'SYN_RCVD', seq: 5000 + Math.floor(Math.random() * 1000), ack: seg.seq + 1,
                 app: this._serverApp(dev, svc),
               };
@@ -424,72 +465,85 @@
             } else {
               /* 端口未监听 → RST */
               NS.log(`${dev.name}: 端口 ${seg.dport} 未监听，发送 RST`, 'warn');
-              Proto.sendIp(dev, ip.src, Frames.tcp(seg.dport, seg.sport, { RST: 1, ACK: 1 }, 0, seg.seq + 1), { ttl: 128 });
+              Proto.sendIp(dev, ip.src, Frames.tcp(seg.dport, seg.sport, { RST: 1, ACK: 1 }, 0, seg.seq + 1), { ttl: 128, srcIp: ip.dst });
             }
           }
           return;
         }
 
-        /* ── 状态机 ── */
-        const st = conn.state;
-        /* 对方 ACK 覆盖了未确认段 → 停止重传 */
-        if (seg.flags.ACK && conn._rt && seg.ack >= conn._rt.end) this._clearRt(conn);
-
-        if (st === 'SYN_SENT' && seg.flags.SYN && seg.flags.ACK) {
+        /* 握手及重复 SYN：第三次 ACK 丢失时仍能恢复。 */
+        if (conn.state === 'SYN_SENT') {
+          if (!seg.flags.SYN || !seg.flags.ACK || seg.ack !== conn.seq) return;
           conn.ack = seg.seq + 1;
-          this._clearRt(conn);
-          this._send(dev, conn, Frames.tcp(conn.localPort, conn.remotePort, { ACK: 1 }, conn.seq, conn.ack), 0);
+          this._acknowledge(conn, seg.ack);
+          this._sendAck(conn);
           conn.state = 'ESTABLISHED';
           this.historyOf(dev).established++;
           NS.log(`${dev.name}: TCP 连接建立 ${this.connName(conn)}`, 'ok');
           if (conn.app.onOpen) conn.app.onOpen(conn);
-        } else if (st === 'SYN_RCVD' && seg.flags.ACK && !seg.flags.SYN) {
-          this._clearRt(conn);
+          Bus.emit('device:changed', dev.id);
+          return;
+        }
+        if (seg.flags.SYN) {
+          if (conn.state === 'SYN_RCVD' && seg.seq + 1 === conn.ack) {
+            const syn = (conn._unacked || []).find(record => record.seg.flags.SYN);
+            if (syn) syn.emit();
+          } else if (seg.flags.ACK && seg.seq + 1 <= conn.ack) {
+            this._sendAck(conn);
+          }
+          return;
+        }
+        if (!seg.flags.ACK) return;
+        if (seg.ack > conn.seq) { this._sendAck(conn); return; }
+
+        // 重复或乱序的数据/FIN 只确认已连续收到的字节，不重复交给应用。
+        if ((seg.dataLen || seg.flags.FIN) && seg.seq !== conn.ack) {
+          this._sendAck(conn);
+          if (conn.state === 'TIME_WAIT' && seg.flags.FIN && seg.seq + 1 === conn.ack) this._mslTimer(conn);
+          return;
+        }
+        const st = conn.state;
+        if (st === 'SYN_RCVD' && (seg.ack !== conn.seq || seg.seq !== conn.ack)) return;
+        this._acknowledge(conn, seg.ack);
+        if (conn.state === 'SYN_RCVD') {
           conn.state = 'ESTABLISHED';
           this.historyOf(dev).established++;
           NS.log(`${dev.name}: 三次握手完成 ${this.connName(conn)}`, 'ok');
           if (conn.app.onOpen) conn.app.onOpen(conn);
-        } else if (st === 'ESTABLISHED' && seg.flags.ACK) {
-          if (seg.dataLen > 0) {
-            conn.ack = seg.seq + seg.dataLen;
-            /* 数据先 ACK，再交应用 */
-            this._send(dev, conn, Frames.tcp(conn.localPort, conn.remotePort, { ACK: 1 }, conn.seq, conn.ack), 0);
-            if (conn.app.onData) conn.app.onData(conn, seg.data);
-            if (seg.flags.FIN) { /* 数据+FIN 合并的罕见情形：按 FIN 处理 */ this._passiveFin(dev, conn, seg); }
-          } else if (seg.flags.FIN) {
-            this._passiveFin(dev, conn, seg);
-          }
-        } else if (st === 'FIN_WAIT_1' && seg.flags.ACK && seg.flags.FIN) {   // 合并挥手：ACK+FIN 一起
-          conn.ack = seg.seq + 1;
-          this._send(dev, conn, Frames.tcp(conn.localPort, conn.remotePort, { ACK: 1 }, conn.seq, conn.ack), 0);
-          conn.state = 'CLOSING';
-        } else if (st === 'FIN_WAIT_1' && seg.flags.ACK && !seg.flags.FIN) {
-          this._clearRt(conn);
+        }
+
+        if (conn.state === 'FIN_WAIT_1' && seg.ack === conn.seq) {
           conn.state = 'FIN_WAIT_2';
-          this._notifyClosed(conn);                   /* 己方 FIN 已确认：应用层关闭 */
-          Bus.emit('device:changed', dev.id);
-        } else if (st === 'FIN_WAIT_2' && seg.flags.FIN) {
-          this._passiveAckFin(dev, conn, seg);
-        } else if (st === 'CLOSING' && seg.flags.ACK) {
-          this._clearRt(conn);
+          this._notifyClosed(conn);
+        } else if (conn.state === 'CLOSING' && seg.ack === conn.seq) {
           conn.state = 'TIME_WAIT'; this._mslTimer(conn);
           this._notifyClosed(conn);
-          Bus.emit('device:changed', dev.id);
-        } else if (st === 'LAST_ACK' && seg.flags.ACK) {
-          /* 被动关闭端收到最终 ACK → 连接完全关闭 */
-          this._clearRt(conn);
+        } else if (conn.state === 'LAST_ACK' && seg.ack === conn.seq) {
           this.historyOf(dev).finClosed++;
           NS.log(`${dev.name}: LAST_ACK 收到最终 ACK，连接关闭 ${this.connName(conn)}`, 'ok');
           this._notifyClosed(conn);
           this._drop(conn);
-        } else if ((st === 'FIN_WAIT_1' || st === 'FIN_WAIT_2') && seg.flags.FIN && seg.flags.ACK && st === 'FIN_WAIT_1') {
-          /* 兜底（上面已处理合并情形） */
+        }
+
+        if (seg.dataLen && ['ESTABLISHED', 'FIN_WAIT_1', 'FIN_WAIT_2'].includes(conn.state)) {
+          conn.ack += seg.dataLen;
+          this._sendAck(conn);
+          if (conn.app.onData) conn.app.onData(conn, seg.data);
+        }
+        if (seg.flags.FIN) {
+          if (conn.state === 'ESTABLISHED') this._passiveFin(dev, conn, seg);
+          else if (conn.state === 'FIN_WAIT_2') this._passiveAckFin(dev, conn, seg);
+          else if (conn.state === 'FIN_WAIT_1') {
+            conn.ack = seg.seq + seg.dataLen + 1;
+            this._sendAck(conn);
+            conn.state = 'CLOSING';
+          }
         }
         if (st !== conn.state) Bus.emit('device:changed', dev.id);
       },
 
       _passiveFin(dev, conn, seg) {                 // ESTABLISHED 收到 FIN → CLOSE_WAIT
-        conn.ack = seg.seq + 1;
+        conn.ack = seg.seq + seg.dataLen + 1;
         this._send(dev, conn, Frames.tcp(conn.localPort, conn.remotePort, { ACK: 1 }, conn.seq, conn.ack), 0);
         conn.state = 'CLOSE_WAIT';
         NS.log(`${dev.name}: 收到 FIN，进入 CLOSE_WAIT ${this.connName(conn)}`, 'info');
@@ -497,7 +551,7 @@
         else if (conn.app.onClose) conn.app.onClose();
       },
       _passiveAckFin(dev, conn, seg) {              // FIN_WAIT_2 收到 FIN → ACK + TIME_WAIT
-        conn.ack = seg.seq + 1;
+        conn.ack = seg.seq + seg.dataLen + 1;
         this._send(dev, conn, Frames.tcp(conn.localPort, conn.remotePort, { ACK: 1 }, conn.seq, conn.ack), 0);
         conn.state = 'TIME_WAIT'; this._mslTimer(conn);
         NS.log(`${dev.name}: 四次挥手完成，进入 TIME_WAIT`, 'ok');
@@ -547,9 +601,11 @@
 
     /* ───── IP 入站（host/router 共用） ───── */
     ipInbound(dev, ifce, ipPkt) {
-      const ip = ipPkt.ip, me = ip.dst === ifce.ip;
+      const ip = ipPkt.ip;
+      if (IP.isLoopback(ip.dst) && ifce.name !== 'lo') return;
+      const me = this.localInterface(dev, ip.dst);
 
-      if (me || ip.dst === '127.0.0.1') {
+      if (me) {
         const l4 = ipPkt.payload;
         if (ip.proto === 'ICMP') this.icmpInbound(dev, ifce, ipPkt, l4);
         else if (ip.proto === 'TCP') this.tcp.inbound(dev, ifce, ipPkt, l4);
@@ -586,8 +642,8 @@
           Proto.sendIp(dev, ip.src, Frames.icmp(3, 1, (l4.echoId != null ? l4.echoId : 0), (l4.seq || 0), 0, ip.dst), { srcIp: inIf.ip, ttl: 128, errCb: () => {} });
           return;
         }
-        ip.ttl = newTtl;   // 就地递减（同一 IP 包跨跳复用，展示逐跳递减）
-        Net.tx(dev, r.ifce, { eth: { dst: mac, src: r.ifce.mac, type: 'IPv4' }, payload: ipPkt, len: 34 + (l4 ? l4.len : 0) });
+        const forwarded = { ...ipPkt, ip: { ...ip, ttl: newTtl } };
+        Net.tx(dev, r.ifce, { eth: { dst: mac, src: r.ifce.mac, type: 'IPv4' }, payload: forwarded, len: 34 + (l4 ? l4.len : 0) });
         NS.log(`${dev.name}: 转发 → ${ip.dst} (TTL=${newTtl}, 下一跳 ${r.nextHop})`, 'info');
       });
     },

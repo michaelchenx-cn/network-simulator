@@ -9,6 +9,7 @@
     rows: [],            // {no, t, linkId, linkName, fromDev, frame, len}
     sel: null,
     point: 'all',
+    nextNo: 1,
 
     init() {
       NS.Bus.on('frame', (rec) => this.capture(rec));
@@ -39,8 +40,12 @@
     },
 
     capture(rec) {
-      this.rows.push({ ...rec, no: this.rows.length + 1 });
-      if (this.rows.length > 1500) { this.rows.shift(); this.rows.forEach((r, i) => r.no = i + 1); }
+      this.rows.push({ ...rec, no: this.nextNo++ });
+      if (this.rows.length > 1500) {
+        const removed = this.rows.shift();
+        document.querySelector(`#sniffer-table tr[data-no="${removed.no}"]`)?.remove();
+        if (this.sel === removed.no) { this.sel = null; this.renderDetail(); }
+      }
       if (this.matchFilter(rec)) this.appendRow(this.rows[this.rows.length - 1]);
       document.getElementById('sn-count').textContent = `${this.rows.length}`;
     },
@@ -86,9 +91,9 @@
       return f.payload.ip.dst;
     },
 
-    rowHtml(r, visible) {
+    rowHtml(r) {
       const proto = this.protoOf(r.frame);
-      return `<tr data-no="${r.no}" ${visible ? '' : 'style="display:none"'}>` +
+      return `<tr data-no="${r.no}">` +
         `<td>${r.no}</td><td>${(r.t / 1000).toFixed(3)}</td>` +
         `<td>${esc(this.srcOf(r))}</td><td>${esc(this.dstOf(r))}</td>` +
         `<td class="p-${proto}">${proto}</td><td>${r.len}</td><td>${esc(this.infoOf(r))}</td></tr>`;
@@ -100,7 +105,6 @@
       tb.insertAdjacentHTML('beforeend', this.rowHtml(r));
       const wrap = document.getElementById('sniffer-table-wrap');
       if (wrap.scrollHeight - wrap.scrollTop - wrap.clientHeight < 60) wrap.scrollTop = wrap.scrollHeight;
-      while (tb.children.length > 1600) tb.removeChild(tb.firstChild);
     },
 
     render() {
@@ -114,7 +118,7 @@
     },
 
     clear() {
-      this.rows = []; this.sel = null;
+      this.rows = []; this.sel = null; this.nextNo = 1;
       document.querySelector('#sniffer-table tbody').innerHTML = '';
       document.getElementById('sn-count').textContent = '0';
       this.renderDetail();

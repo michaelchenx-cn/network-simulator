@@ -53,6 +53,7 @@
       const b = body();
       b.innerHTML = '';
       if (this._liveTimer) { clearInterval(this._liveTimer); this._liveTimer = null; }
+      if (this._liveUnsub) { this._liveUnsub(); this._liveUnsub = null; }
       const sel = this._sel;
       if (!sel || !sel.type) {
         b.appendChild(section(t('insp.noneTitle'), (() => {
@@ -161,7 +162,7 @@
           if (err) { NS.toast && NS.toast(t('toast.badIp'), 'err'); ipIn.value = ifce.ip; }
         };
         ipIn.addEventListener('change', apply); maskSel.addEventListener('change', apply);
-        tr.innerHTML = `<td>${ifce.name}<br><span style="color:#8a94a6">${NS.macWin(ifce.mac)}</span></td>`;
+        tr.innerHTML = `<td>${esc(ifce.name)}<br><span style="color:#8a94a6">${esc(NS.macWin(ifce.mac))}</span></td>`;
         const td2 = document.createElement('td'); td2.appendChild(ipIn);
         const td3 = document.createElement('td'); td3.appendChild(maskSel);
         const td4 = document.createElement('td'); td4.textContent = partnerName(dev, ifce);
@@ -218,7 +219,7 @@
         if (!w) return;
         const rows = [...dev.macTable.entries()];
         w.innerHTML = rows.length ? `<table class="insp-table"><tr><th>MAC</th><th>${t('insp.port')}</th><th>age(s)</th></tr>` +
-          rows.map(([mac, e]) => `<tr><td>${NS.macWin(mac)}</td><td>${e.port}</td><td class="mac-age">${((NS.Engine.time - e.t) / 1000).toFixed(0)}</td></tr>`).join('') + '</table>'
+          rows.map(([mac, e]) => `<tr><td>${esc(NS.macWin(mac))}</td><td>${esc(e.port)}</td><td class="mac-age">${((NS.Engine.time - e.t) / 1000).toFixed(0)}</td></tr>`).join('') + '</table>'
           : `<div class="insp-empty">${t('insp.empty')}</div>`;
         return;
       }
@@ -228,8 +229,8 @@
         dev.interfaces.forEach(ifce => {
           const cache = dev.arpCaches && dev.arpCaches.get(ifce.name);
           if (!cache || !cache.size) return;
-          html += `<div style="font-size:11px;color:#6b7686;margin:4px 0 2px;">${ifce.name}</div><table class="insp-table"><tr><th>IP</th><th>MAC</th></tr>`;
-          [...cache.entries()].forEach(([ip, e]) => { html += `<tr><td>${esc(ip)}</td><td>${NS.macWin(e.mac)}</td></tr>`; });
+          html += `<div style="font-size:11px;color:#6b7686;margin:4px 0 2px;">${esc(ifce.name)}</div><table class="insp-table"><tr><th>IP</th><th>MAC</th></tr>`;
+          [...cache.entries()].forEach(([ip, e]) => { html += `<tr><td>${esc(ip)}</td><td>${esc(NS.macWin(e.mac))}</td></tr>`; });
           html += '</table>';
         });
         arpW.innerHTML = html || `<div class="insp-empty">${t('insp.empty')}</div>`;
@@ -259,9 +260,15 @@
         this.render();
       });
       const dIn = inputEl(link.delay, { readonly: false }); dIn.type = 'number'; dIn.min = 1; dIn.max = 500;
-      dIn.addEventListener('change', () => { link.delay = Math.max(1, Math.min(500, +dIn.value || 4)); dIn.value = link.delay; });
+      dIn.addEventListener('change', () => {
+        link.delay = Math.max(1, Math.min(500, +dIn.value || 4)); dIn.value = link.delay;
+        NS.Bus.emit('topology:touched');
+      });
       const lIn = inputEl(link.loss, { readonly: false }); lIn.type = 'number'; lIn.min = 0; lIn.max = 100;
-      lIn.addEventListener('change', () => { link.loss = Math.max(0, Math.min(100, +lIn.value || 0)); lIn.value = link.loss; });
+      lIn.addEventListener('change', () => {
+        link.loss = Math.max(0, Math.min(100, +lIn.value || 0)); lIn.value = link.loss;
+        NS.Bus.emit('topology:touched');
+      });
       const delBtn = btn(t('insp.deleteLink'), 'danger', () => { NS.world.removeLink(link.id); NS.Canvas.select(null); });
 
       b.appendChild(section(t('insp.link'), endRow('A', e1), endRow('B', e2), row(t('insp.linkState'), upBtn), row(t('insp.delay'), dIn), row(t('insp.loss'), lIn), row('', delBtn)));

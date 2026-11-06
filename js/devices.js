@@ -14,6 +14,7 @@
     addDevice(d) { this.devices.set(d.id, d); NS.Bus.emit('world:changed'); return d; },
     removeDevice(id) {
       const d = this.devices.get(id); if (!d) return;
+      if (NS.Terminals) NS.Terminals.cleanupDevice(id);
       [...this.links.values()].filter(l => l.a.dev === id || l.b.dev === id).forEach(l => this.removeLink(l.id));
       if (d.powerOffCleanup) d.powerOffCleanup();
       this.devices.delete(id);
@@ -46,11 +47,11 @@
     },
 
     clear() {
+      if (NS.Terminals) NS.Terminals.closeAll();
       this.devices.clear(); this.links.clear();
       NS.Engine.reset();
       NS.Logger.clear();
       counters = { pc: 0, router: 0, switch: 0, server: 0, mac: 0, link: 0 };
-      if (NS.Terminals) NS.Terminals.closeAll();   /* 清掉挂在旧设备上的终端 */
       if (NS.Sniffer) NS.Sniffer.clear();
       NS.Bus.emit('world:cleared');
     },
@@ -104,7 +105,8 @@
       this.x = x; this.y = y;
       this.on = true;
       this.interfaces = [];
-      if (type === 'router') { this.interfaces.push(new Interface('ge0/0'), new Interface('ge0/1')); this.staticRoutes = []; }
+      this.staticRoutes = [];
+      if (type === 'router') { this.interfaces.push(new Interface('ge0/0'), new Interface('ge0/1')); }
       else if (type === 'switch') { for (let i = 1; i <= 4; i++) this.interfaces.push(new Interface('port' + i)); this.macTable = new Map(); }
       else { this.interfaces.push(new Interface('eth0')); }
       if (type === 'server') { this.services = { http: true, telnet: true }; }
@@ -140,6 +142,7 @@
       if (!v && this.powerOffCleanup) this.powerOffCleanup();
       NS.log(`${this.name}: ${v ? '开机' : '关机'}`, v ? 'ok' : 'warn');
       NS.Bus.emit('device:changed', this.id);
+      NS.Bus.emit('topology:touched');
     }
 
     applyServices() {                      // server: 同步监听端口
@@ -147,6 +150,7 @@
       if (this.type === 'server') {
         if (this.services.http) P.tcp.listen(this, 80, 'http'); else P.tcp.unlisten(this, 80);
         if (this.services.telnet) P.tcp.listen(this, 23, 'telnet'); else P.tcp.unlisten(this, 23);
+        NS.Bus.emit('topology:touched');
       }
     }
 
@@ -156,14 +160,16 @@
       if (ip && !IP.valid(ip)) return 'badip';
       if (mask && !IP.validMask(mask)) return 'badip';
       if (gw && !IP.valid(gw)) return 'badip';
+      const changedNetwork = (ip !== undefined && ip !== ifce.ip) || (mask !== undefined && mask !== ifce.mask);
       if (ip !== undefined) ifce.ip = ip;
       if (mask !== undefined) ifce.mask = mask;
       if (gw !== undefined) ifce.gw = gw;
       /* IP 变化后清 ARP（与真实系统一致） */
-      if ((ip !== undefined && ip !== ifce.ip) || ip === '') {
+      if (changedNetwork || ip === '') {
         if (this.arpCaches) this.arpCaches.delete(ifName);
       }
       NS.Bus.emit('device:changed', this.id);
+      NS.Bus.emit('topology:touched');
       return null;
     }
 
@@ -171,9 +177,14 @@
       if (!NS.IP.valid(dest) || !NS.IP.validMask(mask) || !NS.IP.valid(nh)) return false;
       this.staticRoutes.push({ dest, mask, nh });
       NS.Bus.emit('device:changed', this.id);
+      NS.Bus.emit('topology:touched');
       return true;
     }
-    removeRoute(i) { this.staticRoutes.splice(i, 1); NS.Bus.emit('device:changed', this.id); }
+    removeRoute(i) {
+      this.staticRoutes.splice(i, 1);
+      NS.Bus.emit('device:changed', this.id);
+      NS.Bus.emit('topology:touched');
+    }
 
     /* 供 netstat / inspector 的连接视图 */
     tcpRows() {
@@ -190,7 +201,7 @@
     toJSON() {
       const o = { id: this.id, type: this.type, name: this.name, x: Math.round(this.x), y: Math.round(this.y), on: this.on,
                   ifaces: this.interfaces.map(i => ({ name: i.name, mac: i.mac, ip: i.ip, mask: i.mask, gw: i.gw })) };
-      if (this.type === 'router') o.staticRoutes = this.staticRoutes.slice();
+      if (this.type !== 'switch') o.staticRoutes = this.staticRoutes.map(r => ({ ...r }));
       if (this.type === 'server') o.services = { ...this.services };
       return o;
     }
@@ -198,18 +209,17 @@
     static fromJSON(o) {
       const type = o.type === 'router' ? 'router' : o.type === 'switch' ? 'switch' : o.type === 'server' ? 'server' : 'pc';
       /* 绕过自动命名/自动建接口：先按类型构造再覆盖 */
-      const d = new Device(type, o.x || 100, o.y || 100);
+      const d = new Device(type, o.x ?? 100, o.y ?? 100);
       d.name = o.name || d.name;
       d.on = o.on !== false;
       d.id = o.id || d.id;
-      d.interfaces = (o.ifaces || []).map(i => {
+      if (o.ifaces && o.ifaces.length) d.interfaces = o.ifaces.map(i => {
         const ifce = new Interface(i.name || 'eth0');
         ifce.mac = i.mac || ifce.mac;
         ifce.ip = i.ip || ''; ifce.mask = i.mask || ''; ifce.gw = i.gw || '';
         return ifce;
       });
-      if (!d.interfaces.length) d.interfaces.push(new Interface(type === 'switch' ? 'port1' : 'eth0'));
-      if (type === 'router') d.staticRoutes = (o.staticRoutes || []).slice();
+      if (type !== 'switch') d.staticRoutes = (o.staticRoutes || []).map(r => ({ ...r }));
       if (type === 'server') { d.services = { http: !!(o.services && o.services.http), telnet: !!(o.services && o.services.telnet) }; d.applyServices(); }
       return d;
     }
@@ -231,25 +241,81 @@
     })),
   });
 
+  function validTopology(data) {
+    const object = value => value && typeof value === 'object' && !Array.isArray(value);
+    const optionalString = value => value === undefined || typeof value === 'string';
+    const optionalBool = value => value === undefined || typeof value === 'boolean';
+    const optionalAddress = value => value === undefined || value === '' || NS.IP.valid(value);
+    const optionalMask = value => value === undefined || value === '' || NS.IP.validMask(value);
+    if (!object(data) || (data.version !== undefined && data.version !== 1) || !Array.isArray(data.devices)) return false;
+    if (data.links !== undefined && !Array.isArray(data.links)) return false;
+    for (const d of data.devices) {
+      if (!object(d) || !['pc', 'server', 'router', 'switch'].includes(d.type)) return false;
+      if (!optionalString(d.id) || !optionalString(d.name) || !optionalBool(d.on)) return false;
+      if ((d.x !== undefined && !Number.isFinite(d.x)) || (d.y !== undefined && !Number.isFinite(d.y))) return false;
+      if (d.ifaces !== undefined && !Array.isArray(d.ifaces)) return false;
+      const names = new Set();
+      for (const i of (d.ifaces || [])) {
+        if (!object(i) || typeof i.name !== 'string' || !i.name || names.has(i.name)) return false;
+        names.add(i.name);
+        if (i.mac !== undefined && (typeof i.mac !== 'string' || !/^([0-9a-f]{2}:){5}[0-9a-f]{2}$/i.test(i.mac))) return false;
+        if (!optionalAddress(i.ip) || !optionalMask(i.mask) || !optionalAddress(i.gw)) return false;
+      }
+      if (d.staticRoutes !== undefined && !Array.isArray(d.staticRoutes)) return false;
+      for (const r of (d.staticRoutes || [])) {
+        if (!object(r) || !NS.IP.valid(r.dest) || !NS.IP.validMask(r.mask) || !NS.IP.valid(r.nh)) return false;
+      }
+      if (d.services !== undefined && (!object(d.services) || !optionalBool(d.services.http) || !optionalBool(d.services.telnet))) return false;
+    }
+    for (const link of (data.links || [])) {
+      if (!object(link) || !object(link.a) || !object(link.b)) return false;
+      if (![link.a.dev, link.a.if, link.b.dev, link.b.if].every(v => typeof v === 'string' && v.length > 0)) return false;
+      if (link.delay !== undefined && (!Number.isFinite(link.delay) || link.delay < 1 || link.delay > 500)) return false;
+      if (link.loss !== undefined && (!Number.isFinite(link.loss) || link.loss < 0 || link.loss > 100)) return false;
+      if (!optionalBool(link.up)) return false;
+    }
+    return true;
+  }
+
   NS.loadTopology = (data) => {
-    if (!data || !Array.isArray(data.devices)) return false;
-    world.clear();
+    if (!validTopology(data)) return false;
+    const previousCounters = counters;
+    counters = { pc: 0, router: 0, switch: 0, server: 0, mac: 0, link: 0 };
+    const devices = new Map(), links = new Map();
     try {
-      data.devices.forEach(o => world.addDevice(NS.Device.fromJSON(o)));
+      data.devices.forEach(o => {
+        const d = NS.Device.fromJSON(o);
+        if (devices.has(d.id)) throw new Error('Duplicate device ID');
+        devices.set(d.id, d);
+        // 导入后继续生成接口时，避开文件中已有的自动分配 MAC。
+        for (const i of d.interfaces) {
+          if (/^00:50:56:[2-7][0-9a-f]:/i.test(i.mac)) {
+            counters.mac = Math.max(counters.mac, parseInt(i.mac.split(':').slice(3).join(''), 16) & 0x1FFFFF);
+          }
+        }
+      });
       (data.links || []).forEach(lo => {
-        const dA = world.devices.get(lo.a.dev), dB = world.devices.get(lo.b.dev);
-        if (!dA || !dB) return;
-        const ifA = dA.getInterface(lo.a.if) || dA.getFreeInterface();
-        const ifB = dB.getInterface(lo.b.if) || dB.getFreeInterface();
-        if (!ifA || !ifB) return;
+        const dA = devices.get(lo.a.dev), dB = devices.get(lo.b.dev);
+        if (!dA || !dB || dA === dB) throw new Error('Invalid link endpoints');
+        const ifA = dA.getInterface(lo.a.if), ifB = dB.getInterface(lo.b.if);
+        if (!ifA || !ifB || ifA.linkId || ifB.linkId) throw new Error('Invalid or occupied interface');
         const link = new Link(ifA, dA, ifB, dB);
         link.delay = lo.delay != null ? lo.delay : 4;
         link.loss = lo.loss || 0;
         link.up = lo.up !== false;
         ifA.linkId = link.id; ifB.linkId = link.id;
-        world.addLink(link);
+        links.set(link.id, link);
       });
-      return true;
-    } catch (e) { console.error(e); return false; }
+    } catch (e) {
+      counters = previousCounters;
+      return false;
+    }
+    const importedCounters = counters;
+    world.clear();
+    counters = importedCounters;
+    devices.forEach(d => world.devices.set(d.id, d));
+    links.forEach(l => world.links.set(l.id, l));
+    NS.Bus.emit('world:changed');
+    return true;
   };
 })(typeof window !== 'undefined' ? window : globalThis);

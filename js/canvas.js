@@ -71,7 +71,11 @@
       window.addEventListener('keydown', (e) => this.onKey(e));
 
       NS.Bus.on('world:changed', () => this.redraw());
-      NS.Bus.on('world:cleared', () => { this.flights.clear(); gPkts().innerHTML = ''; this.redraw(); });
+      NS.Bus.on('world:cleared', () => {
+        this.flights.clear(); gPkts().innerHTML = '';
+        this.linkFrom = null; this._drag = null; this._lastDevClick = null;
+        this.select(null);
+      });
       NS.Bus.on('device:changed', () => this.redraw());
       NS.Bus.on('flight', (f) => this.flights.set(f.id, f));
       NS.Bus.on('flight:end', (id) => this.flights.delete(id));
