@@ -59,7 +59,13 @@
   const Inspector = {
     _liveTimer: null,
 
-    show(sel) { this._sel = sel; this.render(); },
+    show(sel) {
+      this._sel = sel;
+      /* 窄屏下属性栏是浮层：未选中任何对象时收起，别挡住画布（宽屏无 CSS 效果） */
+      const el = document.getElementById('inspector');
+      if (el) el.classList.toggle('collapsed', !sel);
+      this.render();
+    },
 
     render() {
       const b = body();

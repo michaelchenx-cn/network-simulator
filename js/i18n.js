@@ -55,7 +55,7 @@
     'sn.proto':    { zh: '协议', en: 'Protocol' },
     'sn.len':      { zh: '长度', en: 'Len' },
     'sn.info':     { zh: '信息', en: 'Info' },
-    'sn.detailHint': { zh: '点击左侧报文查看逐层解码（以太网帧 → IP → TCP / ICMP / ARP），理解封装关系', en: 'Click a frame on the left to see layer-by-layer decoding (Ethernet → IP → TCP / ICMP / ARP)' },
+    'sn.detailHint': { zh: '点击上方报文列表中的条目，查看逐层解码（以太网帧 → IP → TCP / ICMP / ARP），理解封装关系', en: 'Click a frame in the list above to see layer-by-layer decoding (Ethernet → IP → TCP / ICMP / ARP)' },
     'sn.filter':   { zh: '过滤', en: 'Filter' },
     'sn.onDev':    { zh: '位于', en: 'on' },
 
@@ -125,6 +125,16 @@
     'ui.confirm':     { zh: '确定', en: 'OK' },
     'ui.cancel':      { zh: '取消', en: 'Cancel' },
     'ui.langName':    { zh: '中文', en: 'English' },
+
+    /* ── 确认对话框 / 备份恢复 ── */
+    'confirm.loadLabTitle': { zh: '加载实验', en: 'Load lab' },
+    'confirm.loadLabBody':  { zh: '加载实验将替换当前拓扑配置。当前配置会自动备份，可通过工具栏【恢复备份】找回。', en: 'Loading a lab replaces the current topology. Your current setup will be backed up automatically and can be restored with the 【Restore backup】 toolbar button.' },
+    'confirm.restoreTitle': { zh: '恢复备份拓扑', en: 'Restore backup' },
+    'confirm.restoreBody':  { zh: '将用备份的拓扑替换当前画布配置（实验将被退出）。是否继续？', en: 'Replace the current canvas with the backed-up topology (the active lab will be exited). Continue?' },
+    'tb.restore':     { zh: '恢复备份', en: 'Restore backup' },
+    'toast.backedUp': { zh: '已备份原拓扑，可随时【恢复备份】找回', en: 'Previous topology backed up — restore it anytime with 【Restore backup】' },
+    'toast.restored': { zh: '已恢复备份拓扑', en: 'Backup topology restored' },
+    'toast.noBackup': { zh: '没有可恢复的备份', en: 'No backup to restore' },
 
     /* ── 事件日志 ── */
     'log.title': { zh: '事件日志（仿真内核）', en: 'Event log (simulation kernel)' },

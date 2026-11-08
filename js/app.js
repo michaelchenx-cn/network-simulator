@@ -14,6 +14,70 @@
     setTimeout(() => { d.style.opacity = '0'; d.style.transition = 'opacity .3s'; setTimeout(() => d.remove(), 320); }, duration);
   };
 
+  /* ── 确认对话框（Promise 风格，✕ / 遮罩 / 取消 = false） ── */
+  NS.confirm = (opts = {}) => new Promise((resolve) => {
+    const modal = $('modal-confirm');
+    const okBtn = $('confirm-ok'), cancelBtn = $('confirm-cancel');
+    const closeBtn = modal.querySelector('.modal-close');
+    $('confirm-title').textContent = opts.title || NS.t('ui.confirm');
+    $('confirm-body').textContent = opts.body || '';
+    okBtn.textContent = opts.ok || NS.t('ui.confirm');
+    cancelBtn.textContent = opts.cancel || NS.t('ui.cancel');
+    const close = (v) => {
+      modal.classList.add('hidden');
+      okBtn.removeEventListener('click', onOk);
+      cancelBtn.removeEventListener('click', onCancel);
+      closeBtn.removeEventListener('click', onClose);
+      modal.removeEventListener('click', onMask);
+      resolve(v);
+    };
+    const onOk = () => close(true), onCancel = () => close(false), onClose = () => close(false);
+    const onMask = (e) => { if (e.target === modal) close(false); };
+    okBtn.addEventListener('click', onOk);
+    cancelBtn.addEventListener('click', onCancel);
+    closeBtn.addEventListener('click', onClose);
+    modal.addEventListener('click', onMask);
+    modal.classList.remove('hidden');
+  });
+
+  /* ── 拓扑签名（忽略 savedAt，用于比较“是否还是实验初始拓扑”） ── */
+  NS._topoSig = (t) => JSON.stringify({ devices: (t && t.devices) || [], links: (t && t.links) || [] });
+
+  /* ── 拓扑备份：破坏性操作（加载实验 / 清空）前自动备份，工具栏一键恢复 ── */
+  const BACKUP_KEY = 'ns.topo.backup';
+  NS.Backup = {
+    exists: () => { try { return !!localStorage.getItem(BACKUP_KEY); } catch (e) { return false; } },
+    snapshot() {
+      try {
+        const cur = NS.saveTopology();
+        if (!cur.devices.length) return false;                       // 空画布无需备份
+        /* 当前仍是某实验刚建成的拓扑且已有备份 → 不覆盖（防止连做实验顶掉最初的自建配置） */
+        if (NS.Labs && NS.Labs.builtSnapshot && this.exists()
+          && NS._topoSig(cur) === NS.Labs.builtSnapshot) return false;
+        localStorage.setItem(BACKUP_KEY, JSON.stringify(cur));
+        this.refresh();
+        return true;
+      } catch (e) { return false; }
+    },
+    restore() {
+      try {
+        const s = localStorage.getItem(BACKUP_KEY);
+        if (!s) return false;
+        const ok = NS.loadTopology(JSON.parse(s));
+        if (ok) {
+          /* 恢复的是用户自己的拓扑，退出当前实验上下文 */
+          if (NS.Labs) { NS.Labs.active = null; NS.Labs.renderActive(); NS.Labs.renderList(); }
+          NS.Canvas.select(null);
+        }
+        return ok;
+      } catch (e) { return false; }
+    },
+    refresh() {
+      const b = $('btn-restore');
+      if (b) b.hidden = !this.exists();
+    },
+  };
+
   const App = {
     showTab(name) {
       document.querySelectorAll('.btab[data-tab]').forEach(b => b.classList.toggle('active', b.dataset.tab === name));
@@ -113,6 +177,7 @@
       NS.Sniffer.init();
       NS.Sniffer.bind();
       NS.Labs.init();
+      NS.Backup.refresh();               // 有备份则显示【恢复备份】按钮
       NS.Inspector.show(null);
       NS.SimLoop.start();
 
@@ -154,6 +219,13 @@
         NS.toast(NS.t('toast.exported'), 'ok');
       });
       $('btn-import').addEventListener('click', () => $('file-import').click());
+      $('btn-restore').addEventListener('click', async () => {
+        if (!NS.Backup.exists()) { NS.Backup.refresh(); NS.toast(NS.t('toast.noBackup'), 'warn'); return; }
+        const yes = await NS.confirm({ title: NS.t('confirm.restoreTitle'), body: NS.t('confirm.restoreBody') });
+        if (!yes) return;
+        const ok = NS.Backup.restore();
+        NS.toast(ok ? NS.t('toast.restored') : NS.t('toast.noBackup'), ok ? 'ok' : 'err');
+      });
       $('file-import').addEventListener('change', (e) => {
         const f = e.target.files[0];
         if (!f) return;
@@ -170,6 +242,7 @@
       });
       $('btn-new').addEventListener('click', () => {
         if (confirm(NS.t('toast.confirmNew'))) {
+          NS.Backup.snapshot();          // 清空同为破坏性操作，先备份再清
           NS.world.clear();
           NS.Terminals.closeAll();
           NS.Canvas.select(null);

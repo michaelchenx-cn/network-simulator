@@ -102,14 +102,14 @@
     appendRow(r) {
       if (!this.matchFilter(r)) return;
       const tb = document.querySelector('#sniffer-table tbody');
-      tb.insertAdjacentHTML('beforeend', this.rowHtml(r));
+      tb.insertAdjacentHTML('beforeend', this.rowHtml(r, true));
       const wrap = document.getElementById('sniffer-table-wrap');
       if (wrap.scrollHeight - wrap.scrollTop - wrap.clientHeight < 60) wrap.scrollTop = wrap.scrollHeight;
     },
 
     render() {
       const tb = document.querySelector('#sniffer-table tbody');
-      tb.innerHTML = this.rows.map(r => this.matchFilter(r) ? this.rowHtml(r) : '').join('');
+      tb.innerHTML = this.rows.map(r => this.matchFilter(r) ? this.rowHtml(r, true) : '').join('');
       if (this.sel) this.markSel();
     },
 

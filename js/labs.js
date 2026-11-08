@@ -288,13 +288,28 @@
     load(id) {
       const lab = LABS.find(l => l.id === id);
       if (!lab) return;
-      this.active = lab;
-      NS.world.clear();                 /* 实验替换整个拓扑，必须先清空 */
-      lab.build();
-      NS.Canvas.select(null);
-      NS.toast && NS.toast(NS.t('toast.labLoad') + ' · ' + pick(lab.title), 'ok');
-      this.renderActive();
-      document.getElementById('labs-panel').classList.remove('collapsed');
+      const doLoad = () => {
+        const backed = NS.Backup && NS.Backup.snapshot();
+        if (backed) NS.toast && NS.toast(NS.t('toast.backedUp'), 'info');
+        this.active = lab;
+        NS.world.clear();               /* 实验替换整个拓扑，必须先清空 */
+        lab.build();
+        this.builtSnapshot = NS._topoSig(NS.saveTopology());   // 供备份防覆盖比较
+        NS.Canvas.select(null);
+        NS.toast && NS.toast(NS.t('toast.labLoad') + ' · ' + pick(lab.title), 'ok');
+        this.renderActive();
+        /* 窄屏下侧栏是浮层会盖住画布：加载后收起，让拓扑露出来 */
+        const panel = document.getElementById('labs-panel');
+        if (window.matchMedia && matchMedia('(max-width: 1080px)').matches) panel.classList.add('collapsed');
+        else panel.classList.remove('collapsed');
+      };
+      /* 画布非空时先确认 + 自动备份，防止用户配置被静默清掉 */
+      if (!NS.world.devices.size || !NS.confirm) { doLoad(); return; }
+      NS.confirm({
+        title: NS.t('confirm.loadLabTitle'),
+        body: NS.t('confirm.loadLabBody'),
+        ok: NS.t('confirm.loadLabTitle'),
+      }).then((yes) => { if (yes) doLoad(); });
     },
 
     renderActive() {

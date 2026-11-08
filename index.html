@@ -53,6 +53,7 @@
   <div class="tb-group" id="tb-file">
     <button id="btn-export" data-i18n="tb.export">导出</button>
     <button id="btn-import" data-i18n="tb.import">导入</button>
+    <button id="btn-restore" data-i18n="tb.restore" data-i18n-title="tb.restore" hidden>恢复备份</button>
     <button id="btn-new" class="danger" data-i18n="tb.new">清空</button>
     <input type="file" id="file-import" accept=".json" hidden>
   </div>
@@ -126,7 +127,7 @@
         <div id="sniffer-table-wrap"><table id="sniffer-table"><thead>
           <tr><th>No.</th><th data-i18n="sn.time">时间</th><th data-i18n="sn.src">源地址</th><th data-i18n="sn.dst">目的地址</th><th data-i18n="sn.proto">协议</th><th data-i18n="sn.len">长度</th><th data-i18n="sn.info">信息</th></tr>
         </thead><tbody></tbody></table></div>
-        <div id="sniffer-detail" class="muted" data-i18n="sn.detailHint">点击左侧报文查看逐层解码（帧 → IP → TCP/ICMP/ARP）</div>
+        <div id="sniffer-detail" class="muted" data-i18n="sn.detailHint">点击上方报文列表中的条目，查看逐层解码（以太网帧 → IP → TCP / ICMP / ARP）</div>
       </div>
     </div>
     <div id="pane-log" class="bpane"><div id="log-area"></div></div>
@@ -138,6 +139,18 @@
   <div class="modal-box">
     <div class="modal-head"><span data-i18n="help.title">使用帮助</span><button class="modal-close">✕</button></div>
     <div id="help-body" class="modal-body"></div>
+  </div>
+</div>
+
+<!-- 弹层：确认 -->
+<div id="modal-confirm" class="modal hidden">
+  <div class="modal-box">
+    <div class="modal-head"><span id="confirm-title"></span><button class="modal-close">✕</button></div>
+    <div class="modal-body" id="confirm-body"></div>
+    <div class="modal-foot">
+      <button id="confirm-cancel" class="modal-btn"></button>
+      <button id="confirm-ok" class="modal-btn primary"></button>
+    </div>
   </div>
 </div>
 

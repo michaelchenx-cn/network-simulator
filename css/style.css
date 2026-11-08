@@ -289,6 +289,15 @@ svg text { user-select: none; }
 .modal-body table { border-collapse: collapse; width: 100%; margin: 6px 0; }
 .modal-body th, .modal-body td { border: 1px solid #e5eaf1; padding: 4px 8px; text-align: left; font-size: 12px; }
 .modal-body th { background: #f8fafc; }
+#modal-confirm .modal-box { width: min(420px, 92vw); }
+.modal-foot { display: flex; justify-content: flex-end; gap: 10px; padding: 0 18px 14px; }
+.modal-btn {
+  border: 1px solid #d4dbe4; background: #fff; color: #374151; border-radius: 7px;
+  padding: 6px 18px; font-size: 12.5px; cursor: pointer;
+}
+.modal-btn:hover { background: #f3f5f9; }
+.modal-btn.primary { background: #2563eb; border-color: #2563eb; color: #fff; }
+.modal-btn.primary:hover { background: #1d4ed8; }
 
 #toast-container { position: fixed; top: 56px; right: 14px; z-index: 99; display: flex; flex-direction: column; gap: 8px; }
 .toast {
@@ -301,9 +310,13 @@ svg text { user-select: none; }
 .toast-err { background: #dc2626; }
 @keyframes toast-in { from { opacity: 0; transform: translateX(20px); } to { opacity: 1; transform: none; } }
 
-/* 响应式：窄屏隐藏侧栏 */
+/* 响应式：窄屏侧栏变浮层 */
 @media (max-width: 1080px) {
   #labs-panel, #inspector { position: absolute; z-index: 40; top: 46px; bottom: var(--bottom-h, 250px); }
-  #inspector { right: 0; box-shadow: -4px 0 14px rgba(0,0,0,.08); }
+  #inspector { right: 0; box-shadow: -4px 0 14px rgba(0,0,0,.08); transition: margin-right .22s ease; }
+  #inspector.collapsed { margin-right: -272px; }
   #labs-panel { box-shadow: 4px 0 14px rgba(0,0,0,.08); }
+  /* 抓包：上下堆叠时给报文列表更多高度，解码区有内容再撑开 */
+  #sniffer-table-wrap { flex: 2.4; }
+  #sniffer-detail { flex: 1; max-height: 46%; }
 }
