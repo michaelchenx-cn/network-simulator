@@ -149,7 +149,7 @@
       if (this.placeType) {                          /* 放置设备 */
         const p = this.toWorld(e);
         const d = NS.createDevice(this.placeType, p.x, p.y);
-        NS.log(`放置设备 ${d.name}`, 'ok');
+        NS.log({ zh: `放置设备 ${d.name}`, en: `Placed device ${d.name}` }, 'ok');
         this.setMode('select');
         this.select({ type: 'device', id: d.id });
         return;
@@ -243,6 +243,7 @@
       this.zoomAt(e.deltaY < 0 ? 1.12 : 1 / 1.12, e.clientX - r.left, e.clientY - r.top);
     },
     onKey(e) {
+      if (e.defaultPrevented || document.querySelector('dialog[open]')) return;
       if (e.key === 'Escape') {
         if (this.placeType || this.mode !== 'select') { this.setMode('select'); return; }
         if (this.linkFrom) { this.linkFrom = null; this.redraw(); return; }

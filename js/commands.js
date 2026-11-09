@@ -33,15 +33,11 @@
         out.push((zh ? '   子网掩码  . . . . . . . . . . . . . : ' : '   Subnet Mask . . . . . . . . . . . : ') + ifce.mask);
         if (ifce.gw) out.push((zh ? '   默认网关. . . . . . . . . . . . . : ' : '   Default Gateway . . . . . . . . . : ') + ifce.gw);
       } else {
-        /* 未配置 → APIPA 自动配置地址（教学点：未配 IP 时 Windows 会自配 169.254.x.x） */
-        const n = ifce.mac.split(':').slice(3).join(''), h = parseInt(n, 16) || 1;
-        const apipa = `169.254.${(h >> 8) & 255}.${h & 255}`;
-        out.push((zh ? '   自动配置 IPv4 地址 . . . . . . . . . : ' : '   Autoconfiguration IPv4 Address. . : ') + apipa);
-        out.push((zh ? '   子网掩码  . . . . . . . . . . . . . : ' : '   Subnet Mask . . . . . . . . . . . : ') + '255.255.0.0');
+        out.push(L('   IPv4 地址 . . . . . . . . . . . . . : 未配置', '   IPv4 Address. . . . . . . . . . . : Not configured'));
       }
       if (all) {
         out.push(zh ? '   DHCP 已启用 . . . . . . . . . . . : 否' : '   DHCP Enabled. . . . . . . . . . : No');
-        out.push(zh ? '   自动配置已启用 . . . . . . . . . : 是' : '   Autoconfiguration Enabled . . . . : Yes');
+        out.push(zh ? '   自动配置已启用 . . . . . . . . . : 否' : '   Autoconfiguration Enabled . . . . : No');
       }
     });
     ctx.print(out.join('\n') + '\n');
@@ -61,10 +57,10 @@
       else if (isFlag(a, '4') || isFlag(a, '6')) { /* 忽略 */ }
       else target.push(a);
     }
-    const dst = target[0];
-    if (!dst || !IP.valid(dst)) {
-      ctx.print(L(`Ping 请求找不到主机 ${dst || ''}。请检查该名称，然后重试。`,
-                  `Ping request could not find host ${dst || ''}. Please check the name and try again.`), 't-dim');
+    const dst = IP.normalize(target[0]);
+    if (!dst) {
+      ctx.print(L(`Ping 请求找不到主机 ${target[0] || ''}。请检查该名称，然后重试。`,
+                  `Ping request could not find host ${target[0] || ''}. Please check the name and try again.`), 't-dim');
       return null;
     }
     const n = flags.t ? Infinity : (flags.n && flags.n > 0 ? Math.min(flags.n, 50) : 4);
@@ -137,8 +133,8 @@
 
   /* ───── tracert ───── */
   function tracertCmd(ctx, argv) {
-    const dst = argv.find(a => !a.startsWith('-') && !a.startsWith('/'));
-    if (!dst || !IP.valid(dst)) {
+    const dst = IP.normalize(argv.find(a => !a.startsWith('-') && !a.startsWith('/')));
+    if (!dst) {
       ctx.print(L(`用法: tracert <目标IP>`, `Usage: tracert <target-ip>`), 't-dim');
       return null;
     }
@@ -221,20 +217,21 @@
   function arpCmd(ctx, argv) {
     const zh = NS.I18N.lang === 'zh';
     if (argv.some(a => /^-d/i.test(a))) {
-      ctx.dev.arpCaches && ctx.dev.arpCaches.clear();
+      ctx.dev.arpCaches?.forEach(cache => cache.clear());
+      ctx.dev.arpCaches?.clear();
       ctx.print(zh ? 'ARP 缓存已清空。' : 'ARP cache flushed.');
       NS.Bus.emit('device:changed', ctx.dev.id);
       return null;
     }
     const rows = [];
     ctx.dev.interfaces.forEach(ifce => {
-      const cache = ctx.dev.arpCaches && ctx.dev.arpCaches.get(ifce.name);
-      if (!cache || !cache.size || !ifce.ip) return;
+      const entries = P().arpEntries(ctx.dev, ifce.name);
+      if (!entries.length || !ifce.ip) return;
       rows.push('');
       rows.push(zh ? `接口: ${ifce.ip} --- 0x3` : `Interface: ${ifce.ip} --- 0x3`);
       rows.push(zh ? '  Internet 地址         物理地址              类型'
                    : '  Internet Address      Physical Address      Type');
-      [...cache.entries()].sort(([a], [b]) => IP.parse(a) - IP.parse(b)).forEach(([ip, e]) => {
+      entries.sort(([a], [b]) => IP.parse(a) - IP.parse(b)).forEach(([ip, e]) => {
         rows.push(`  ${ip.padEnd(20)}${NS.macWin(e.mac).padEnd(22)}${zh ? '动态' : 'dynamic'}`);
       });
     });
@@ -265,18 +262,22 @@
     const dev = ctx.dev;
     const sub = (argv[0] || 'print').toLowerCase();
     if (sub === 'add' || sub === 'delete') {
-      if (dev.type !== 'router' && dev.type !== 'pc' && dev.type !== 'server') return null;
+      if (dev.type === 'switch') {
+        ctx.print(L('二层交换机不支持配置 IP 路由。', 'Layer 2 switches do not support configuring IP routes.'), 't-err');
+        return null;
+      }
       if (sub === 'add') {
         const hasMask = /^mask$/i.test(argv[2]);
         const dest = argv[1], mask = hasMask ? argv[3] : '255.255.255.255';
         const nextHop = argv[hasMask ? 4 : 2];
         if (argv.length === (hasMask ? 5 : 3) && dev.addRoute(dest, mask, nextHop)) {
           ctx.print(zh ? ' 操作完成!' : ' Manipulated route successfully!');
+          if (!P().resolveNextHop(dev, dev.staticRoutes.at(-1))) ctx.print(NS.t('insp.inactiveRoute'), 't-dim');
         } else {
           ctx.print(zh ? '路由添加失败，参数不正确。' : 'Route addition failed because a parameter is incorrect.', 't-err');
         }
       } else {
-        const dest = argv[1];
+        const dest = IP.normalize(argv[1]);
         const i = (dev.staticRoutes || []).findIndex(r => r.dest === dest);
         if (i >= 0) { dev.removeRoute(i); ctx.print(zh ? ' 操作完成!' : ' Manipulated route successfully!'); }
         else ctx.print(zh ? '找不到元素。' : 'Element not found.', 't-err');
@@ -288,7 +289,10 @@
     dev.interfaces.forEach(ifce => {
       if (ifce.ip && ifce.mask) rows.push({ dest: IP.network(ifce.ip, ifce.mask), mask: ifce.mask, gw: null, ifce: ifce.ip, metric: 281 });
     });
-    (dev.staticRoutes || []).forEach(r => rows.push({ dest: r.dest, mask: r.mask, gw: r.nh, ifce: '', metric: 1 }));
+    (dev.staticRoutes || []).forEach(r => {
+      const resolved = P().resolveNextHop(dev, r);
+      rows.push({ dest: r.dest, mask: r.mask, gw: r.nh, ifce: resolved?.ifce.ip || '', metric: 1, inactive: !resolved });
+    });
     const gwIf = dev.interfaces.find(i => i.gw);
     if (gwIf) rows.push({ dest: '0.0.0.0', mask: '0.0.0.0', gw: gwIf.gw, ifce: gwIf.ip, metric: 25 });
 
@@ -296,15 +300,16 @@
     out.push('===========================================================================');
     out.push(zh ? 'IPv4 路由表' : 'IPv4 Route Table');
     out.push('===========================================================================');
-    out.push(zh ? '活动路由:' : 'Active Routes:');
+    out.push(zh ? '路由条目:' : 'Route Entries:');
     out.push(zh ? '网络目标            网络掩码            网关          接口          跃点数'
                 : 'Network Destination        Netmask          Gateway       Interface  Metric');
     if (!rows.length) out.push(zh ? '  （无路由）' : '  (no routes)');
     rows.sort((a, b) => IP.parse(a.mask) - IP.parse(b.mask) || IP.parse(a.dest) - IP.parse(b.dest));
     rows.forEach(r => {
       const gw = r.gw || (zh ? '在链上' : 'on-link');
-      if (zh) out.push(`${r.dest.padEnd(20)}${r.mask.padEnd(20)}${gw.padEnd(14)}${r.ifce.padEnd(16)}${String(r.metric).padStart(5)}`);
-      else out.push(`${r.dest.padEnd(26)}${r.mask.padEnd(18)}${gw.padEnd(16)}${r.ifce.padEnd(18)}${String(r.metric).padStart(5)}`);
+      const status = r.inactive ? `  (${NS.t('insp.inactiveRoute')})` : '';
+      if (zh) out.push(`${r.dest.padEnd(20)}${r.mask.padEnd(20)}${gw.padEnd(14)}${r.ifce.padEnd(16)}${String(r.metric).padStart(5)}${status}`);
+      else out.push(`${r.dest.padEnd(26)}${r.mask.padEnd(18)}${gw.padEnd(16)}${r.ifce.padEnd(18)}${String(r.metric).padStart(5)}${status}`);
     });
     out.push('===========================================================================');
     ctx.print(out.join('\n') + '\n');
@@ -321,14 +326,17 @@
       dev.interfaces.forEach(ifce => {
         if (ifce.ip && ifce.mask) out.push(`C  ${IP.network(ifce.ip, ifce.mask)}/${IP.maskLen(ifce.mask)} is directly connected, ${ifce.name}`);
       });
-      (dev.staticRoutes || []).forEach(r => out.push(`S  ${r.dest}/${IP.maskLen(r.mask)} [1/0] via ${r.nh}`));
+      (dev.staticRoutes || []).forEach(r => {
+        const status = P().resolveNextHop(dev, r) ? '' : ` (${NS.t('insp.inactiveRoute')})`;
+        out.push(`S  ${r.dest}/${IP.maskLen(r.mask)} [1/0] via ${r.nh}${status}`);
+      });
       if (out.length === 2) out.push(zh ? '（无路由）' : '(no routes)');
       ctx.print(out.join('\n') + '\n');
     } else if (dev.type === 'router' && /arp/.test(what)) {
       ctx.dev = dev; arpCmd(ctx, []);
     } else if (dev.type === 'switch' && /mac/.test(what)) {
       const out = ['Mac Address Table', '-------------------------------------------'];
-      const rows = [...dev.macTable.entries()];
+      const rows = P().macEntries(dev);
       if (!rows.length) out.push(zh ? ' No MAC entries' : ' No MAC entries');
       rows.forEach(([mac, e]) => {
         const ciscoMac = mac.replace(/:/g, '').replace(/(.{4})(.{4})(.{4})/, '$1.$2.$3').toLowerCase();
@@ -338,7 +346,10 @@
     } else if (/interface/.test(what)) {
       const out = [];
       dev.interfaces.forEach(ifce => {
-        out.push(`${ifce.name}  ${ifce.ip ? `${ifce.ip} ${ifce.mask}` : 'unassigned'}  ${ifce.linkId ? 'up' : 'down'}  ${ifce.mac}`);
+        const link = NS.world.links.get(ifce.linkId);
+        const peer = link && NS.world.devices.get(link.otherEnd(dev.id).dev);
+        const up = dev.on && link?.up && peer?.on;
+        out.push(`${ifce.name}  ${ifce.ip ? `${ifce.ip} ${ifce.mask}` : 'unassigned'}  ${up ? 'up' : 'down'}  ${ifce.mac}`);
       });
       ctx.print(out.join('\n') + '\n');
     } else {
@@ -377,8 +388,8 @@
   /* ───── telnet ───── */
   function telnetCmd(ctx, argv) {
     const zh = NS.I18N.lang === 'zh';
-    const dst = argv[0], port = +argv[1] || 23;
-    if (!dst || !IP.valid(dst)) { ctx.print(zh ? '用法: telnet <IP> [端口]' : 'Usage: telnet <ip> [port]'); return null; }
+    const dst = IP.normalize(argv[0]), port = +argv[1] || 23;
+    if (!dst) { ctx.print(zh ? '用法: telnet <IP> [端口]' : 'Usage: telnet <ip> [port]'); return null; }
     if (!E.running) ctx.print(L('（仿真已暂停：按 ▶ 继续后报文才会收发）', '(Simulation paused: press \u25B6 to resume packet flow)'), 't-dim');
 
     let finished = false;
@@ -395,6 +406,7 @@
         const t = line.trim();
         if (t.toLowerCase() === 'quit') {
           conn.send('quit');
+          conn.close();
           ctx.print(zh ? '（正在断开连接…）' : '(closing connection...)', 't-dim');
         } else if (t) conn.send(t + '\r\n');
       },
@@ -405,10 +417,7 @@
     const conn = P().tcp.open(ctx.dev, dst, port, {
       onOpen() { ctx.print(zh ? `已连接到 ${dst}:${port}（输入内容将发送给服务器，输入 quit 断开）` : `Connected to ${dst}:${port} (type to send; 'quit' to close)`); },
       onData(c, d) {
-        const text = String(d).replace(/\r/g, '');
-        ctx.print(text);
-        /* 收到 Goodbye 后由客户端主动挥手（可观察四次挥手 + TIME_WAIT） */
-        if (/Goodbye/.test(text)) NS.Engine.schedule(150, () => c.close(), 'telnet-client-close');
+        ctx.print(String(d).replace(/\r/g, ''));
       },
       onPeerFin(c) { c.close(); },
       onClose() { ctx.print(zh ? '连接已关闭。' : 'Connection closed.', 't-dim'); finish(); },
@@ -420,8 +429,8 @@
   /* ───── http（浏览器访问网页的抽象演示） ───── */
   function httpCmd(ctx, argv) {
     const zh = NS.I18N.lang === 'zh';
-    const dst = argv[0];
-    if (!dst || !IP.valid(dst)) { ctx.print(zh ? '用法: http <IP>' : 'Usage: http <ip>'); return null; }
+    const dst = IP.normalize(argv[0]);
+    if (!dst) { ctx.print(zh ? '用法: http <IP>' : 'Usage: http <ip>'); return null; }
     if (!E.running) ctx.print(L('（仿真已暂停：按 ▶ 继续后报文才会收发）', '(Simulation paused: press \u25B6 to resume packet flow)'), 't-dim');
     let finished = false;
     const finish = () => { if (!finished) { finished = true; ctx.endJob(); } };

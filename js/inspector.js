@@ -61,9 +61,7 @@
 
     show(sel) {
       this._sel = sel;
-      /* 窄屏下属性栏是浮层：未选中任何对象时收起，别挡住画布（宽屏无 CSS 效果） */
-      const el = document.getElementById('inspector');
-      if (el) el.classList.toggle('collapsed', !sel);
+      document.getElementById('inspector').classList.toggle('collapsed', !sel);
       this.render();
     },
 
@@ -136,8 +134,9 @@
         const gwIn = inputEl(ifce.gw, { placeholder: '192.168.1.1' });
         const apply = () => {
           const err = dev.setIfConfig(ifce.name, { ip: ipIn.value.trim(), mask: maskSel.value, gw: gwIn.value.trim() });
-          if (err) { NS.toast && NS.toast(t('toast.badIp'), 'err'); ipIn.value = ifce.ip; maskSel.value = ifce.mask; gwIn.value = ifce.gw; }
-          else NS.toast && NS.toast(dev.name + ' ' + ifce.name + ' OK', 'ok');
+          ipIn.value = ifce.ip; maskSel.value = ifce.mask; gwIn.value = ifce.gw;
+          if (err) NS.toast?.(t('toast.badIp'), 'err');
+          else NS.toast?.(dev.name + ' ' + ifce.name + ' OK', 'ok');
         };
         [ipIn, maskSel, gwIn].forEach(el => el.addEventListener('change', apply));
         b.appendChild(section(`${t('insp.iface')} · ${ifce.name} (${partnerName(dev, ifce)})`,
@@ -150,7 +149,7 @@
       box.style.cssText = 'display:flex;flex-direction:column;gap:6px;';
       const mk = (key, labelKey) => {
         const lab = document.createElement('label');
-        lab.className = 'chk'; lab.style.cssText = 'display:flex;gap:6px;align-items:center;color:#374151;';
+        lab.className = 'chk'; lab.style.cssText = 'display:flex;gap:6px;align-items:center;color:var(--text-2);';
         const cb = document.createElement('input'); cb.type = 'checkbox'; cb.checked = !!dev.services[key];
         cb.addEventListener('change', () => { dev.services[key] = cb.checked; dev.applyServices(); });
         lab.append(cb, document.createTextNode(t(labelKey)));
@@ -163,15 +162,18 @@
     renderRouter(b, dev) {
       /* 接口表 */
       const tbl = document.createElement('table');
+      const refreshRouteStatus = [];
       tbl.className = 'insp-table';
       tbl.innerHTML = `<tr><th>${t('insp.iface')}</th><th>IP</th><th>${t('insp.mask')}</th><th>${t('insp.link')}</th><th></th></tr>`;
       dev.interfaces.forEach(ifce => {
         const tr = document.createElement('tr');
-        const ipIn = inputEl(ifce.ip, { placeholder: '未配置' }); ipIn.style.width = '92px'; ipIn.style.fontSize = '11px';
+        const ipIn = inputEl(ifce.ip, { placeholder: t('insp.unconfigured') }); ipIn.style.width = '92px'; ipIn.style.fontSize = '11px';
         const maskSel = maskSelect(ifce.mask, { compact: true }); maskSel.style.fontSize = '11px';
         const apply = () => {
           const err = dev.setIfConfig(ifce.name, { ip: ipIn.value.trim(), mask: maskSel.value });
-          if (err) { NS.toast && NS.toast(t('toast.badIp'), 'err'); ipIn.value = ifce.ip; maskSel.value = ifce.mask; }
+          ipIn.value = ifce.ip; maskSel.value = ifce.mask;
+          if (err) NS.toast?.(t('toast.badIp'), 'err');
+          else refreshRouteStatus.forEach(update => update());
         };
         ipIn.addEventListener('change', apply); maskSel.addEventListener('change', apply);
         tr.innerHTML = `<td>${esc(ifce.name)}<br><span style="color:#8a94a6">${esc(NS.macWin(ifce.mac))}</span></td>`;
@@ -190,6 +192,12 @@
       (dev.staticRoutes || []).forEach((r, i) => {
         const tr = document.createElement('tr');
         tr.innerHTML = `<td>${esc(r.dest)}</td><td>${esc(r.mask)}</td><td>${esc(r.nh)}</td>`;
+        const status = document.createElement('div');
+        status.className = 'muted';
+        const updateStatus = () => { status.textContent = NS.Proto.resolveNextHop(dev, r) ? '' : t('insp.inactiveRoute'); };
+        refreshRouteStatus.push(updateStatus);
+        updateStatus();
+        tr.lastElementChild.appendChild(status);
         const td = document.createElement('td');
         const x = document.createElement('span'); x.className = 'x-del'; x.textContent = '✕';
         x.addEventListener('click', () => { dev.removeRoute(i); this.render(); });
@@ -215,7 +223,11 @@
       const tblWrap = document.createElement('div');
       tblWrap.dataset.live = 'mac';
       box.appendChild(tblWrap);
-      const clearBtn = btn(t('insp.clearMac'), '', () => { dev.macTable.clear(); NS.log(`${dev.name}: MAC 表已清空`); this.renderLive(dev); });
+      const clearBtn = btn(t('insp.clearMac'), '', () => {
+        dev.macTable.clear();
+        NS.log({ zh: `${dev.name}: MAC 表已清空`, en: `${dev.name}: MAC table cleared` });
+        this.renderLive(dev);
+      });
       b.appendChild(section(t('insp.macTable'), tblWrap, clearBtn));
       this.renderLive(dev);
       this._liveTimer = setInterval(() => {
@@ -229,7 +241,7 @@
       if (dev.type === 'switch') {
         const w = b.querySelector('[data-live="mac"]');
         if (!w) return;
-        const rows = [...dev.macTable.entries()];
+        const rows = NS.Proto.macEntries(dev);
         w.innerHTML = rows.length ? `<table class="insp-table"><tr><th>MAC</th><th>${t('insp.port')}</th><th>age(s)</th></tr>` +
           rows.map(([mac, e]) => `<tr><td>${esc(NS.macWin(mac))}</td><td>${esc(e.port)}</td><td class="mac-age">${((NS.Engine.time - e.t) / 1000).toFixed(0)}</td></tr>`).join('') + '</table>'
           : `<div class="insp-empty">${t('insp.empty')}</div>`;
@@ -239,10 +251,10 @@
       if (arpW) {
         let html = '';
         dev.interfaces.forEach(ifce => {
-          const cache = dev.arpCaches && dev.arpCaches.get(ifce.name);
-          if (!cache || !cache.size) return;
+          const entries = NS.Proto.arpEntries(dev, ifce.name);
+          if (!entries.length) return;
           html += `<div style="font-size:11px;color:#6b7686;margin:4px 0 2px;">${esc(ifce.name)}</div><table class="insp-table"><tr><th>IP</th><th>MAC</th></tr>`;
-          [...cache.entries()].forEach(([ip, e]) => { html += `<tr><td>${esc(ip)}</td><td>${esc(NS.macWin(e.mac))}</td></tr>`; });
+          entries.forEach(([ip, e]) => { html += `<tr><td>${esc(ip)}</td><td>${esc(NS.macWin(e.mac))}</td></tr>`; });
           html += '</table>';
         });
         arpW.innerHTML = html || `<div class="insp-empty">${t('insp.empty')}</div>`;
@@ -267,7 +279,7 @@
       };
       const upBtn = btn(link.up ? t('insp.up') + ' ✓' : t('insp.down'), link.up ? 'on-btn' : 'on-btn off', () => {
         link.up = !link.up;
-        NS.log(`${link.name()}: ${link.up ? '链路恢复' : '链路断开'}`, link.up ? 'ok' : 'warn');
+        NS.log({ zh: `${link.name()}: ${link.up ? '链路恢复' : '链路断开'}`, en: `${link.name()}: Link ${link.up ? 'restored' : 'down'}` }, link.up ? 'ok' : 'warn');
         NS.Bus.emit('world:changed');
         this.render();
       });

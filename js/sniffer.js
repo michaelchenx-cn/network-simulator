@@ -13,7 +13,7 @@
 
     init() {
       NS.Bus.on('frame', (rec) => this.capture(rec));
-      NS.Bus.on('world:cleared', () => this.clear());
+      NS.Bus.on('world:cleared', () => { this.clear(); this.refreshPoints(); });
 
       document.getElementById('sn-clear').addEventListener('click', () => this.clear());
       ['sn-arp', 'sn-icmp', 'sn-tcp'].forEach(id => document.getElementById(id).addEventListener('change', () => this.render()));
@@ -29,8 +29,9 @@
       const cur = this.point;
       sel.innerHTML = `<option value="all">${NS.t('sn.all')}</option>` +
         [...NS.world.links.values()].map(l => `<option value="${l.id}">${esc(l.name())}</option>`).join('');
-      this.point = [...NS.world.links.values()].some(l => l.id === cur) || cur === 'all' ? cur : 'all';
+      this.point = NS.world.links.has(cur) ? cur : 'all';
       sel.value = this.point;
+      if (cur !== this.point) this.render();
     },
 
     protoOf(frame) {
@@ -102,14 +103,14 @@
     appendRow(r) {
       if (!this.matchFilter(r)) return;
       const tb = document.querySelector('#sniffer-table tbody');
-      tb.insertAdjacentHTML('beforeend', this.rowHtml(r, true));
+      tb.insertAdjacentHTML('beforeend', this.rowHtml(r));
       const wrap = document.getElementById('sniffer-table-wrap');
       if (wrap.scrollHeight - wrap.scrollTop - wrap.clientHeight < 60) wrap.scrollTop = wrap.scrollHeight;
     },
 
     render() {
       const tb = document.querySelector('#sniffer-table tbody');
-      tb.innerHTML = this.rows.map(r => this.matchFilter(r) ? this.rowHtml(r, true) : '').join('');
+      tb.innerHTML = this.rows.map(r => this.matchFilter(r) ? this.rowHtml(r) : '').join('');
       if (this.sel) this.markSel();
     },
 
@@ -125,9 +126,8 @@
     },
 
     /* ── 逐层解码 ── */
-    fields(rowsHtml) { return rowsHtml.map(([k, v]) => `<div class="dec-field"><b>${k}</b><span class="fv">${esc(v)}</span></div>`).join(''); }
+    fields(rowsHtml) { return rowsHtml.map(([k, v]) => `<div class="dec-field"><b>${k}</b><span class="fv">${esc(v)}</span></div>`).join(''); },
 
-    ,
     renderDetail() {
       const box = document.getElementById('sniffer-detail');
       const r = this.rows.find(x => x.no === this.sel);

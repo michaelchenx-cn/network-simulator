@@ -677,6 +677,120 @@ section('T25 arp -a 按 IPv4 数值排序');
   assert(ips.join(',') === '192.168.1.20,192.168.1.100,192.168.2.1,192.168.10.1', '同时按主机位和网段的数值排序');
 }
 
+section('T26 静态下一跳递归解析');
+{
+  const { PC1, Router1, Router2 } = loadLab('lab-route');
+  Router1.addRoute('192.168.2.0', '255.255.255.0', '172.16.0.1');
+  Router1.addRoute('172.16.0.0', '255.255.255.0', '192.168.2.1');
+  const output = [];
+  NS.Commands.execute('show ip route', { dev: Router1, print: text => output.push(text) });
+  assert(NS.Proto.routerRoute(Router1, '192.168.2.10').err === 'noroute' && output.join('').includes('下一跳不可解析'),
+    '递归环路不会阻塞查找，路由表显示未生效原因');
+  Router1.addRoute('172.16.0.1', '255.255.255.255', '10.0.0.2');
+  Router2.addRoute('192.168.1.0', '255.255.255.0', '10.0.0.1');
+  assert(pingResult(PC1, '192.168.2.10')?.kind === 'reply', '递归解析到直连下一跳后，实际报文可往返');
+}
+
+section('T27 地址规范化与冲突检测');
+{
+  const { PC1, PC2 } = loadLab('lab-arp');
+  assert(cfg(PC2, 'eth0', ' 192.168.001.020 ', '255.255.255.0') === null &&
+    pingResult(PC1, '192.168.1.20')?.kind === 'reply', 'IPv4 规范化后 ARP 使用相同地址');
+  assert(cfg(PC2, 'eth0', '255.255.255.255', '255.255.255.0') && cfg(PC2, 'eth0', '0.0.0.0', '255.255.255.0') &&
+    PC2.interfaces[0].ip === '192.168.1.20' && NS.IP.validMask('255.255.255.254'), '拒绝特殊接口地址并保留合法 /31 掩码');
+  const isolated = NS.createDevice('pc', 0, 0);
+  const notices = [];
+  const off = NS.Bus.on('address:conflict', conflicts => notices.push(conflicts));
+  isolated.setIfConfig('eth0', { ip: PC1.interfaces[0].ip });
+  PC2.setIfConfig('eth0', { ip: PC1.interfaces[0].ip });
+  off();
+  assert(notices.length === 1 && notices[0].some(c => c.kind === 'IP'), '仅同一二层网络的重复 IP 触发警告');
+  const data = NS.saveTopology();
+  const first = data.devices.find(d => d.id === PC1.id).ifaces[0];
+  const second = data.devices.find(d => d.id === PC2.id).ifaces[0];
+  first.mac = 'aa:bb:cc:dd:ee:01';
+  second.mac = first.mac.toUpperCase();
+  second.ip = ' 192.168.001.020 ';
+  assert(!NS.loadTopology(data) && NS.world.devices.get(PC2.id) === PC2, '重复 MAC 导入无法静默覆盖原拓扑');
+  assert(NS.loadTopology(data, { beforeReplace: conflicts => conflicts.some(c => c.kind === 'MAC') }) &&
+    NS.world.devices.get(PC2.id).interfaces[0].ip === '192.168.1.20', '确认冲突后可导入故障拓扑，并规范化旧文件地址');
+}
+
+section('批量创建时设备 ID 保持唯一');
+{
+  const now = Date.now, random = Math.random;
+  try {
+    Date.now = () => 100;
+    Math.random = () => 0;
+    const { PC1, PC2 } = loadLab('lab-ip');
+    assert(PC1.id !== PC2.id && NS.world.devices.size === 3 && NS.world.links.size === 2,
+      '同一毫秒创建的设备不会覆盖彼此或破坏链路');
+  } finally {
+    Date.now = now;
+    Math.random = random;
+  }
+}
+
+section('T28 实验 1 核验地址和应答设备');
+{
+  const { PC1, PC2, Switch1 } = loadLab('lab-ip');
+  const checks = NS.LABS.find(lab => lab.id === 'lab-ip').checks;
+  const verify = () => checks.map(check => {
+    let pass;
+    check.run(value => { pass = value; });
+    NS.Engine.advanceUntilIdle(10000);
+    return pass;
+  });
+  cfg(PC1, 'eth0', '192.168.1.10', '');
+  cfg(PC2, 'eth0', '10.0.0.20', '255.0.0.0');
+  assert(verify().every(pass => pass === false), '缺少掩码时两项验收均失败');
+  cfg(PC1, 'eth0', '192.168.1.10', '255.255.255.0');
+  cfg(PC2, 'eth0', '192.168.1.10', '255.255.255.0');
+  const link = NS.world.links.get(PC2.interfaces[0].linkId);
+  link.up = false;
+  assert(verify().every(pass => pass === false), '断链和重复 IP 无法通过本机应答绕过验收');
+  cfg(PC2, 'eth0', '192.168.1.20', '255.255.255.0');
+  const other = NS.createDevice('pc', 0, 0);
+  cfg(other, 'eth0', '192.168.1.20', '255.255.255.0');
+  NS.connectDevices(other, Switch1);
+  assert(pingResult(PC1, '192.168.1.20')?.kind === 'reply' && verify()[1] === false, '另一台设备的应答不计入 PC2 的验收');
+  NS.world.removeDevice(other.id);
+  PC1.arpCaches.clear();
+  link.up = true;
+  assert(verify().every(pass => pass === true), '恢复正确拓扑和配置后两项均可通过');
+}
+
+section('T29 仿真时间驱动地址表过期');
+{
+  const { PC1, Switch1 } = loadLab('lab-arp');
+  pingResult(PC1, '192.168.1.20');
+  NS.Engine.time += NS.Proto.ARP_AGE / 2;
+  pingResult(PC1, '192.168.1.20');
+  NS.Engine.time += NS.Proto.ARP_AGE / 2;
+  NS.Engine.process();
+  assert(Switch1.macTable.size > 0 && PC1.arpCaches.get('eth0').size === 0, 'ARP 按学习时间到期，MAC 流量刷新后延长有效期');
+  NS.Engine.time += NS.Proto.MAC_AGE;
+  NS.Engine.process();
+  assert(Switch1.macTable.size === 0, '空闲时 MAC 表也按仿真时间回收');
+}
+
+section('T30 终端输出反映实际接口与设备状态');
+{
+  const { PC1, PC2, Switch1 } = loadLab('lab-ip');
+  const run = (dev, cmd) => {
+    const output = [];
+    NS.Commands.execute(cmd, { dev, print: text => output.push(text) });
+    return output.join('\n');
+  };
+  assert(run(PC1, 'ipconfig /all').includes('未配置') && !run(PC1, 'ipconfig /all').includes('169.254.'), '未配置接口不显示虚构 APIPA 地址');
+  assert(run(Switch1, 'route add 10.0.0.0 192.168.1.1').includes('不支持') &&
+    run(Switch1, 'route delete 10.0.0.0').includes('不支持'), '二层交换机提示不支持修改 IP 路由');
+  const link = NS.world.links.get(PC2.interfaces[0].linkId);
+  assert(run(PC2, 'show interfaces').includes('  up  '), '正常链路的接口显示 up');
+  link.up = false;
+  assert(run(PC2, 'show interfaces').includes('  down  '), '断链的接口显示 down');
+}
+
 assert(runtimeErrors.length === 0, '协议事件和命令执行无被捕获的运行时异常');
 
 /* ─────────── 输出 ─────────── */

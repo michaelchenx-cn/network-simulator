@@ -41,10 +41,32 @@ def main():
             context = browser.new_context(viewport={'width': 1440, 'height': 1000}, locale='zh-CN')
             page = context.new_page()
             errors = []
+            dialog_messages = []
+            accept_dialog = True
+
+            def on_dialog(dialog):
+                dialog_messages.append(dialog.message)
+                if accept_dialog:
+                    dialog.accept()
+                else:
+                    dialog.dismiss()
+
+            page.on('dialog', on_dialog)
             page.on('pageerror', lambda error: errors.append(str(error)))
             page.on('console', lambda message: errors.append(message.text) if message.type == 'error' else None)
             page.goto((ROOT / 'index.html').as_uri())
             page.wait_for_load_state('networkidle')
+            run_button = page.locator('#btn-run')
+            check(page.evaluate('NS.Engine.running && NS.Engine.time > 0') and run_button.text_content() == '⏸' and
+                  run_button.get_attribute('aria-label') == '暂停仿真' and 'running' in run_button.get_attribute('class'),
+                  '页面打开后自动运行，按钮显示暂停')
+            run_button.click()
+            check(page.evaluate('!NS.Engine.running') and run_button.text_content() == '▶' and
+                  run_button.get_attribute('aria-label') == '运行仿真', '暂停后按钮显示运行')
+            run_button.click()
+            page.locator('#btn-step').click()
+            check(page.evaluate('!NS.Engine.running') and run_button.text_content() == '▶', '单步时同步显示暂停后的按钮状态')
+            run_button.click()
             page.locator('.lab-load').nth(2).click()
             page.locator('.dev-node').filter(has_text='PC1').dblclick()
             command(page, 'ping -n 1 192.168.1.20')
@@ -58,6 +80,13 @@ def main():
             terminal_input.press('Enter')
             check(terminal_input.get_attribute('readonly') is not None and '通过最多' not in terminal_output.inner_text(),
                   '持续 ping 期间无法启动第二条命令')
+            before_replace = page.evaluate('[NS.Engine.time, NS.world.devices.size, NS.Terminals.map.size]')
+            accept_dialog = False
+            with page.expect_event('dialog'):
+                import_file(page, {'devices': []})
+            accept_dialog = True
+            check(page.evaluate('[NS.Engine.time, NS.world.devices.size, NS.Terminals.map.size]') == before_replace and
+                  terminal_input.get_attribute('readonly') is not None, '取消导入保留仿真时钟和正在运行的命令')
             terminal_input.press('Control+c')
             interrupted_output = terminal_output.inner_text()
             page.evaluate('NS.Engine.advanceUntilIdle(5000)')
@@ -87,6 +116,8 @@ def main():
             check(page.locator('#g-packets').get_by_text('REPLY', exact=True).count() > 0 and
                   page.locator('.dev-type-switch .dev-sub').text_content() == '3 ports linked',
                   '切到英文后刷新正在飞行的报文和交换机标签')
+            check('Broadcasting an ARP request' in page.locator('#log-area').text_content() and
+                  '广播 ARP 请求' not in page.locator('#log-area').text_content(), '既有协议日志随语言切换')
             page.locator('#btn-lang').click()
             page.evaluate('NS.Engine.advanceUntilIdle(500)')
             page.locator('#btn-run').click()
@@ -111,6 +142,13 @@ def main():
             check(buffer_ok, '抓包缓存淘汰后行号稳定、详情选择和数据一致')
 
             page.locator('.dev-node').filter(has_text='PC1').click()
+            device_count = page.locator('.dev-node').count()
+            page.locator('#btn-help').click()
+            page.keyboard.press('Delete')
+            page.keyboard.press('Backspace')
+            page.keyboard.press('Escape')
+            check(not page.locator('#modal-help').is_visible() and page.locator('.dev-node').count() == device_count and
+                  page.evaluate("document.activeElement.id === 'btn-help'"), '帮助窗口拦截删除键，Esc 关闭并归还焦点')
             before = page.evaluate("NS.Bus._m.get('device:changed').size")
             for _ in range(5):
                 page.locator('.dev-node').filter(has_text='PC2').click()
@@ -152,8 +190,17 @@ def main():
                 {'id': 'review-pc', 'type': 'pc', 'name': marker, 'x': 100, 'y': 350,
                  'ifaces': [{'name': 'eth0', 'mac': '00:50:56:20:00:02', 'ip': '192.168.1.10', 'mask': '255.255.255.0'}]},
             ], 'links': []}
+            accept_dialog = False
+            with page.expect_event('dialog'):
+                import_file(page, fixture)
+            page.locator('.lab-load').nth(1).click()
+            check(page.evaluate('NS.Labs.active?.id') == 'lab-arp' and page.locator('.dev-node[data-id="review-router"]').count() == 0 and
+                  '终端会关闭' in dialog_messages[-2] and '加载实验' in dialog_messages[-1], '取消导入或加载实验会保留当前拓扑')
+            accept_dialog = True
             import_file(page, fixture)
             page.wait_for_selector('.dev-node[data-id="review-router"]')
+            check(page.locator('#lab-active').count() == 0 and page.locator('#log-area .log-line').count() == 0 and
+                  page.locator('#btn-restore').is_enabled(), '成功导入退出旧实验、清空日志并留下恢复入口')
             page.locator('.dev-node[data-id="review-router"]').click()
             check(page.locator('#inspector-body img').count() == 0 and marker in page.locator('#inspector-body').inner_text(), '导入接口名称按文本显示')
             mask_select = page.get_by_role('combobox', name='子网掩码', exact=True).first
@@ -173,6 +220,7 @@ def main():
             page.locator('#btn-lang').click()
             english_mask = page.get_by_role('combobox', name='Subnet mask', exact=True).last
             check(english_mask.locator(zero_option).text_content() == '/0 (Default route)', '默认路由提示随语言切换')
+            check(router_ip.get_attribute('placeholder') == 'Unconfigured', '路由接口占位文案随语言切换')
             page.locator('#btn-lang').click()
             page.locator('.dev-node[data-id="review-pc"]').click()
             page.get_by_placeholder('192.168.1.10', exact=True).fill('192.168.1.11')
@@ -219,16 +267,58 @@ def main():
             command(page, 'http 192.168.1.20')
             page.wait_for_function("document.querySelector('.term-output').textContent.includes('连接已关闭')", timeout=15000)
             check('200 OK' in page.locator('.term-output').inner_text(), '实际终端 HTTP 请求收到响应并完成关闭')
+            command(page, 'telnet 192.168.1.20')
+            page.wait_for_function("document.querySelector('.term-output').textContent.includes('Welcome to Server1')")
+            command(page, 'Goodbye everyone')
+            page.wait_for_function("document.querySelector('.term-output').textContent.includes('echo: Goodbye everyone')")
+            page.evaluate('NS.Engine.advanceUntilIdle(1000)')
+            check(page.evaluate('NS.Terminals.map.get(NS.Terminals.activeId).job?.wantsInput'), '含 Goodbye 的普通回显保留 Telnet 连接')
+            command(page, 'quit')
+            page.wait_for_function('!NS.Terminals.map.get(NS.Terminals.activeId).job')
+            check('Goodbye.' in terminal_output.inner_text() and terminal_output.inner_text().count('连接已关闭') == 2,
+                  'Telnet quit 仍输出告别消息并正常关闭')
             command(page, 'route add 10.0.0.0 mask 255.0.0.0 192.168.1.20')
             page.wait_for_function("JSON.parse(localStorage.getItem('ns.topo')).devices.find(d => d.name === 'PC1').staticRoutes.length === 1")
             page.reload()
             page.wait_for_load_state('networkidle')
             check(page.evaluate("[...NS.world.devices.values()].find(d => d.name === 'PC1').staticRoutes.length") == 1, '主机路由自动保存且刷新后恢复')
 
-            page.on('dialog', lambda dialog: dialog.accept())
             page.locator('#btn-new').click()
             page.wait_for_function("JSON.parse(localStorage.getItem('ns.topo')).devices.length === 0")
             check(page.evaluate('NS.world.devices.size') == 0, '清空画布后自动保存空拓扑')
+            page.reload()
+            page.locator('#btn-restore').click()
+            check(page.evaluate("[...NS.world.devices.values()].find(d => d.name === 'PC1')?.staticRoutes.length") == 1,
+                  '重新打开页面后仍能恢复替换前的拓扑配置')
+
+            page.evaluate("""() => {
+                NS.SimLoop.pause();
+                const pc = [...NS.world.devices.values()].find(d => d.name === 'PC1');
+                NS.Proto.icmpEcho(pc, '192.168.1.20', {}, () => {});
+                NS.Engine.advanceUntilIdle(2000);
+            }""")
+            page.locator('[data-tab="sniffer"]').click()
+            total_rows = rows.count()
+            capture_point = page.locator('#sn-point')
+            link_id = page.evaluate('NS.Sniffer.rows[0].linkId')
+            capture_point.select_option(link_id)
+            filtered_rows = rows.count()
+            page.locator(f'.link-hit[data-id="{link_id}"]').click()
+            page.get_by_role('button', name='删除此链路').click()
+            check(0 < filtered_rows < total_rows and capture_point.input_value() == 'all' and rows.count() == total_rows,
+                  '删除抓包点后重新显示全部历史报文')
+
+            page.set_viewport_size({'width': 1024, 'height': 820})
+            if page.evaluate("document.getElementById('labs-panel').classList.contains('collapsed')"):
+                page.locator('#btn-labs').click()
+            page.locator('.lab-load').first.click()
+            check(page.evaluate("document.getElementById('labs-panel').classList.contains('collapsed')") and
+                  not page.locator('#inspector').is_visible(), '窄屏加载实验后收起侧栏，露出画布')
+            saved_backup = page.evaluate("localStorage.getItem('ns.topo.backup')")
+            page.locator('#btn-labs').click()
+            page.locator('.lab-load').nth(1).click()
+            check(saved_backup and page.evaluate("localStorage.getItem('ns.topo.backup')") == saved_backup and
+                  '已有拓扑备份将保留' in dialog_messages[-1], '连续切换未修改的实验时保留自建拓扑备份')
             check(not errors, f'浏览器无脚本错误 {errors}')
             print(f'\n浏览器回归通过 {checks} 项', flush=True)
             context.close()

@@ -12,6 +12,7 @@
 (function (root) {
   const NS = root.NS = root.NS || {};
   const Engine = NS.Engine, Bus = NS.Bus;
+  const echoResponders = new WeakMap();
 
   /* ══════════ IP 工具 ══════════ */
   const IP = {
@@ -24,7 +25,13 @@
       return ((p[0] << 24) | (p[1] << 16) | (p[2] << 8) | p[3]) >>> 0;
     },
     str(n) { return [(n >>> 24) & 255, (n >>> 16) & 255, (n >>> 8) & 255, n & 255].join('.'); },
+    normalize(s) { const n = IP.parse(s); return n === null ? '' : IP.str(n); },
     valid(s) { return IP.parse(s) !== null; },
+    validUnicast(s) {
+      const n = IP.parse(s);
+      const first = n >>> 24;
+      return n !== null && first > 0 && first !== 127 && first < 224;
+    },
     validMask(s) {
       const n = IP.parse(s); if (n === null) return false;
       const inv = (~n) >>> 0;
@@ -36,7 +43,10 @@
       return c;
     },
     maskOf(len) { return len === 0 ? 0 : (0xFFFFFFFF << (32 - len)) >>> 0; },
-    inSubnet(ip, netIp, mask) { return ((IP.parse(ip) ^ IP.parse(netIp)) & IP.parse(mask)) === 0; },
+    inSubnet(ip, netIp, mask) {
+      const a = IP.parse(ip), b = IP.parse(netIp), m = IP.parse(mask);
+      return a !== null && b !== null && m !== null && ((a ^ b) & m) === 0;
+    },
     network(ip, mask) { return IP.str((IP.parse(ip) & IP.parse(mask)) >>> 0); },
     BROADCAST: '255.255.255.255',
     isBroadcast(mac) { return mac === 'FF:FF:FF:FF:FF:FF'; },
@@ -89,15 +99,15 @@
     /* 从 dev.outIf 发出一帧；返回 true 表示已上线 */
     tx(dev, outIf, frame) {
       if (!dev.on || NS.world.devices.get(dev.id) !== dev) return false;
-      if (!outIf || !outIf.linkId) { NS.log(`${dev.name}: ${outIf ? outIf.name : '?'} 没有链路，丢弃报文`, 'warn'); return false; }
+      if (!outIf || !outIf.linkId) { NS.log({ zh: `${dev.name}: ${outIf ? outIf.name : '?'} 没有链路，丢弃报文`, en: `${dev.name}: No link on ${outIf ? outIf.name : '?'}. Packet dropped` }, 'warn'); return false; }
       const link = NS.world.links.get(outIf.linkId);
-      if (!link || !link.up) { NS.log(`${dev.name}: 链路断开，丢弃 ${frame.eth.type} 报文`, 'warn'); return false; }
+      if (!link || !link.up) { NS.log({ zh: `${dev.name}: 链路断开，丢弃 ${frame.eth.type} 报文`, en: `${dev.name}: Link down. ${frame.eth.type} packet dropped` }, 'warn'); return false; }
       const other = link.a.dev === dev.id ? link.b : link.a;
       const peer = NS.world.devices.get(other.dev);
-      if (!peer || !peer.on) { NS.log(`${dev.name}: 对端关机，丢弃报文`, 'warn'); return false; }
+      if (!peer || !peer.on) { NS.log({ zh: `${dev.name}: 对端关机，丢弃报文`, en: `${dev.name}: Peer is powered off. Packet dropped` }, 'warn'); return false; }
 
       if (link.loss > 0 && Math.random() * 100 < link.loss) {
-        NS.log(`${dev.name} → ${peer.name}: 丢包率触发，${frame.eth.type} 报文丢失`, 'warn');
+        NS.log({ zh: `${dev.name} → ${peer.name}: 丢包率触发，${frame.eth.type} 报文丢失`, en: `${dev.name} → ${peer.name}: Simulated loss dropped a ${frame.eth.type} packet` }, 'warn');
         return false;
       }
 
@@ -115,6 +125,35 @@
     },
   };
   NS.Net = Net;
+
+  function learnAddress(dev, table, address, fields, lifetime) {
+    const current = table.get(address);
+    if (current) {
+      Object.assign(current, fields, { t: Engine.time });
+      return;
+    }
+    const entry = { ...fields, t: Engine.time };
+    table.set(address, entry);
+    const expire = () => {
+      if (NS.world.devices.get(dev.id) !== dev || table.get(address) !== entry) return;
+      const remaining = entry.t + lifetime - Engine.time;
+      if (remaining > 0) {
+        Engine.schedule(remaining, expire, 'address-expiry');
+        return;
+      }
+      table.delete(address);
+      Bus.emit('device:changed', dev.id);
+    };
+    Engine.schedule(lifetime, expire, 'address-expiry');
+  }
+
+  function activeAddresses(table, lifetime) {
+    if (!table) return [];
+    for (const [address, entry] of table) {
+      if (Engine.time - entry.t >= lifetime) table.delete(address);
+    }
+    return [...table];
+  }
 
   /* ══════════ 协议栈 ══════════ */
   const Proto = {
@@ -135,13 +174,16 @@
       return dev.arpCaches.get(ifName);
     },
     arpLookup(dev, ifName, ip) {
-      const e = this.arpCacheOf(dev, ifName).get(ip);
-      if (e && Engine.time - e.t > this.ARP_AGE) { this.arpCacheOf(dev, ifName).delete(ip); return null; }
+      const cache = dev.arpCaches?.get(ifName);
+      const e = cache?.get(ip);
+      if (e && Engine.time - e.t >= this.ARP_AGE) { cache.delete(ip); return null; }
       return e ? e.mac : null;
     },
+    arpEntries(dev, ifName) { return activeAddresses(dev.arpCaches?.get(ifName), this.ARP_AGE); },
+    macEntries(dev) { return activeAddresses(dev.macTable, this.MAC_AGE); },
     arpLearn(dev, ifName, ip, mac) {
       if (!ip || !mac || ip === '0.0.0.0' || mac === '00:00:00:00:00:00') return;
-      this.arpCacheOf(dev, ifName).set(ip, { mac, t: Engine.time });
+      learnAddress(dev, this.arpCacheOf(dev, ifName), ip, { mac }, this.ARP_AGE);
       Bus.emit('device:changed', dev.id);
     },
 
@@ -158,12 +200,12 @@
       pend.timer = Engine.schedule(this.ARP_TIMEOUT, () => {
         if (!dev._arpPending.has(key)) return;
         dev._arpPending.delete(key);
-        NS.log(`${dev.name}: ARP 解析 ${nextHopIp} 超时`, 'warn');
+        NS.log({ zh: `${dev.name}: ARP 解析 ${nextHopIp} 超时`, en: `${dev.name}: ARP resolution for ${nextHopIp} timed out` }, 'warn');
         pend.cbs.forEach(fn => fn('timeout'));
         Bus.emit('device:changed', dev.id);
       }, `arp-timeout ${nextHopIp}`);
 
-      NS.log(`${dev.name}: 广播 ARP 请求，查询 ${nextHopIp} 的 MAC`, 'info');
+      NS.log({ zh: `${dev.name}: 广播 ARP 请求，查询 ${nextHopIp} 的 MAC`, en: `${dev.name}: Broadcasting an ARP request for ${nextHopIp}` }, 'info');
       Net.tx(dev, outIf, Frames.arp(1, outIf.mac, outIf.ip, '00:00:00:00:00:00', nextHopIp));
     },
 
@@ -180,7 +222,7 @@
         if (pend) {
           Engine.cancel(pend.timer);
           dev._arpPending.delete(key);
-          NS.log(`${dev.name}: 收到 ARP 应答 ${arp.spa} is-at ${arp.sha}`, 'ok');
+          NS.log({ zh: `${dev.name}: 收到 ARP 应答 ${arp.spa} is-at ${arp.sha}`, en: `${dev.name}: ARP reply received: ${arp.spa} is at ${arp.sha}` }, 'ok');
           pend.cbs.forEach(fn => fn(null, arp.sha));
         }
       }
@@ -199,8 +241,7 @@
       return { err: 'noroute' };
     },
 
-    /* 路由器路由：直连 + 静态最长前缀匹配 */
-    routerRoute(dev, dstIp) {
+    connectedRoute(dev, dstIp) {
       let best = null;
       for (const ifce of dev.interfaces) {
         if (!ifce.ip || !ifce.mask) continue;
@@ -209,17 +250,41 @@
           best = { ifce, nextHop: dstIp, len };
         }
       }
-      for (const r of (dev.staticRoutes || [])) {
-        if (!IP.valid(r.dest) || !IP.validMask(r.mask) || !IP.valid(r.nh)) continue;
-        if (!IP.inSubnet(dstIp, r.dest, r.mask)) continue;
-        const len = IP.maskLen(r.mask);
-        if (best && len <= best.len) continue;
-        const nhIf = dev.interfaces
-          .filter(ifce => ifce.ip && ifce.mask && IP.inSubnet(r.nh, ifce.ip, ifce.mask))
-          .sort((a, b) => IP.maskLen(b.mask) - IP.maskLen(a.mask))[0];
-        if (nhIf) best = { ifce: nhIf, nextHop: r.nh, len };
+      return best;
+    },
+
+    matchingStaticRoutes(dev, dstIp) {
+      return dev.staticRoutes.filter(r => IP.inSubnet(dstIp, r.dest, r.mask))
+        .sort((a, b) => IP.maskLen(b.mask) - IP.maskLen(a.mask));
+    },
+
+    resolveNextHop(dev, route, visited = new Set()) {
+      const pending = [route];
+      while (pending.length) {
+        const candidate = pending.pop();
+        if (visited.has(candidate)) continue;
+        visited.add(candidate);
+        const direct = this.connectedRoute(dev, candidate.nh);
+        if (direct) return direct;
+        const matches = this.matchingStaticRoutes(dev, candidate.nh);
+        for (let i = matches.length - 1; i >= 0; i--) {
+          if (!visited.has(matches[i])) pending.push(matches[i]);
+        }
       }
-      return best || { err: 'noroute' };
+      return null;
+    },
+
+    /* 路由器路由：最长前缀匹配，非直连下一跳沿静态路由递归解析。 */
+    routerRoute(dev, dstIp) {
+      const direct = this.connectedRoute(dev, dstIp);
+      const visited = new Set();
+      for (const r of this.matchingStaticRoutes(dev, dstIp)) {
+        const len = IP.maskLen(r.mask);
+        if (direct && len <= direct.len) break;
+        const resolved = this.resolveNextHop(dev, r, visited);
+        if (resolved) return { ...resolved, len };
+      }
+      return direct || { err: 'noroute' };
     },
 
     localInterface(dev, ip) {
@@ -244,7 +309,7 @@
       }
       const r = dev.type === 'router' ? this.routerRoute(dev, dstIp) : this.hostRoute(dev, dstIp);
       if (r.err) {
-        NS.log(`${dev.name}: 无到 ${dstIp} 的路由`, 'warn');
+        NS.log({ zh: `${dev.name}: 无到 ${dstIp} 的路由`, en: `${dev.name}: No route to ${dstIp}` }, 'warn');
         if (opts.errCb) opts.errCb(r.err);
         return;
       }
@@ -263,7 +328,7 @@
      *   {kind:'tlexceeded', from, ms}   TTL 超时（tracert 中间跳）
      *   {kind:'unreachable', from, ms, code}  目标不可达
      *   {kind:'noroute'}               本机无路由（传输失败） */
-    icmpEcho(dev, dstIp, { echoId = nextEchoId++, seq = 1, ttl = 128, size = 32, timeout } = {}, onDone) {
+    icmpEcho(dev, dstIp, { echoId = nextEchoId++, seq = 1, ttl = 128, size = 32, timeout, expectedResponder } = {}, onDone) {
       if (!dev.icmpCbs) dev.icmpCbs = new Map();
       let done = false;
       const cancel = () => {
@@ -275,7 +340,7 @@
       };
       const finish = (res) => { if (cancel()) onDone(res); };
       const sentAt = Engine.time;
-      const entry = { finish, sentAt };
+      const entry = { finish, sentAt, expectedResponder };
       dev.icmpCbs.set(echoId, entry);
       const timer = Engine.schedule(timeout || this.ICMP_TIMEOUT, () => finish({ kind: 'timeout' }), `icmp-timeout ${dstIp}`);
 
@@ -291,12 +356,17 @@
     icmpInbound(dev, ifce, ipPkt, icmp) {
       const ip = ipPkt.ip;
       if (icmp.type === 8) {                       // echo request → 回复
-        this.sendIp(dev, ip.src, Frames.icmp(0, 0, icmp.echoId, icmp.seq, icmp.dataLen), { ttl: 128, srcIp: ip.dst });
+        const reply = Frames.icmp(0, 0, icmp.echoId, icmp.seq, icmp.dataLen);
+        // 实验验收可以校验应答设备，元数据不会出现在报文中。
+        echoResponders.set(reply, dev);
+        this.sendIp(dev, ip.src, reply, { ttl: 128, srcIp: ip.dst });
         return;
       }
       if (icmp.type === 0) {
         const entry = dev.icmpCbs?.get(icmp.echoId);
-        if (entry) entry.finish({ kind: 'reply', from: ip.src, ms: Engine.time - entry.sentAt, ttl: ip.ttl });
+        if (entry && (!entry.expectedResponder || echoResponders.get(icmp) === entry.expectedResponder)) {
+          entry.finish({ kind: 'reply', from: ip.src, ms: Engine.time - entry.sentAt, ttl: ip.ttl });
+        }
         return;
       }
       if (icmp.type !== 3 && icmp.type !== 11) return;
@@ -433,11 +503,11 @@
         const arm = () => {
           if (!pending.includes(record) || conn.state === 'CLOSED') return;
           if (record.retries-- <= 0) {
-            NS.log(`${dev.name}: TCP 重传超时，连接关闭`, 'warn');
+            NS.log({ zh: `${dev.name}: TCP 重传超时，连接关闭`, en: `${dev.name}: TCP retransmissions timed out. Connection closed` }, 'warn');
             this._fail(conn, record.icmpError ? 'icmp' : 'timeout', record.icmpError);
             return;
           }
-          NS.log(`${dev.name}: 重传 ${this.segInfo(seg)}`, 'warn');
+          NS.log({ zh: `${dev.name}: 重传 ${this.segInfo(seg)}`, en: `${dev.name}: Retransmitting ${this.segInfo(seg)}` }, 'warn');
           record.rto *= 2;
           record.timer = Engine.schedule(record.rto, arm, 'tcp-rto');
           emit();
@@ -468,7 +538,7 @@
       _mslTimer(conn) {
         Engine.cancel(conn._timeWaitTimer);
         conn._timeWaitTimer = Engine.schedule(2 * Proto.MSL, () => {
-          NS.log(`${conn.dev.name}: TIME_WAIT 结束，连接关闭`, 'ok');
+          NS.log({ zh: `${conn.dev.name}: TIME_WAIT 结束，连接关闭`, en: `${conn.dev.name}: TIME_WAIT expired. Connection closed` }, 'ok');
           this.historyOf(conn.dev).finClosed++;
           this._drop(conn);
           Bus.emit('device:changed', conn.dev.id);
@@ -508,11 +578,11 @@
               conns.push(nconn);
               this._helpers(nconn);
               this._send(dev, nconn, Frames.tcp(seg.dport, seg.sport, { SYN: 1, ACK: 1 }, nconn.seq - 1, nconn.ack), Proto.TCP_SYN_RETRY);
-              NS.log(`${dev.name}: 端口 ${seg.dport} 收到 SYN，回复 SYN+ACK`, 'info');
+              NS.log({ zh: `${dev.name}: 端口 ${seg.dport} 收到 SYN，回复 SYN+ACK`, en: `${dev.name}: Port ${seg.dport} received SYN. Sending SYN+ACK` }, 'info');
               Bus.emit('device:changed', dev.id);
             } else {
               /* 端口未监听 → RST */
-              NS.log(`${dev.name}: 端口 ${seg.dport} 未监听，发送 RST`, 'warn');
+              NS.log({ zh: `${dev.name}: 端口 ${seg.dport} 未监听，发送 RST`, en: `${dev.name}: Port ${seg.dport} is not listening. Sending RST` }, 'warn');
               Proto.sendIp(dev, ip.src, Frames.tcp(seg.dport, seg.sport, { RST: 1, ACK: 1 }, 0, seg.seq + 1), { ttl: 128, srcIp: ip.dst });
             }
           } else if (seg.flags.SYN && seg.flags.ACK) {
@@ -531,7 +601,7 @@
           this._sendAck(conn);
           conn.state = 'ESTABLISHED';
           this.historyOf(dev).established++;
-          NS.log(`${dev.name}: TCP 连接建立 ${this.connName(conn)}`, 'ok');
+          NS.log({ zh: `${dev.name}: TCP 连接建立 ${this.connName(conn)}`, en: `${dev.name}: TCP connection established ${this.connName(conn)}` }, 'ok');
           if (conn.app.onOpen) conn.app.onOpen(conn);
           Bus.emit('device:changed', dev.id);
           return;
@@ -560,7 +630,7 @@
         if (conn.state === 'SYN_RCVD') {
           conn.state = 'ESTABLISHED';
           this.historyOf(dev).established++;
-          NS.log(`${dev.name}: 三次握手完成 ${this.connName(conn)}`, 'ok');
+          NS.log({ zh: `${dev.name}: 三次握手完成 ${this.connName(conn)}`, en: `${dev.name}: Three-way handshake complete ${this.connName(conn)}` }, 'ok');
           if (conn.app.onOpen) conn.app.onOpen(conn);
         }
 
@@ -572,7 +642,7 @@
           this._notifyClosed(conn);
         } else if (conn.state === 'LAST_ACK' && seg.ack === conn.seq) {
           this.historyOf(dev).finClosed++;
-          NS.log(`${dev.name}: LAST_ACK 收到最终 ACK，连接关闭 ${this.connName(conn)}`, 'ok');
+          NS.log({ zh: `${dev.name}: LAST_ACK 收到最终 ACK，连接关闭 ${this.connName(conn)}`, en: `${dev.name}: Final ACK received in LAST_ACK. Connection closed ${this.connName(conn)}` }, 'ok');
           this._notifyClosed(conn);
           this._drop(conn);
         }
@@ -598,7 +668,7 @@
         conn.ack = seg.seq + seg.dataLen + 1;
         this._send(dev, conn, Frames.tcp(conn.localPort, conn.remotePort, { ACK: 1 }, conn.seq, conn.ack), 0);
         conn.state = 'CLOSE_WAIT';
-        NS.log(`${dev.name}: 收到 FIN，进入 CLOSE_WAIT ${this.connName(conn)}`, 'info');
+        NS.log({ zh: `${dev.name}: 收到 FIN，进入 CLOSE_WAIT ${this.connName(conn)}`, en: `${dev.name}: Received FIN. Entering CLOSE_WAIT ${this.connName(conn)}` }, 'info');
         if (conn.app.onPeerFin) conn.app.onPeerFin(conn);
         else if (conn.app.onClose) conn.app.onClose();
       },
@@ -606,7 +676,7 @@
         conn.ack = seg.seq + seg.dataLen + 1;
         this._send(dev, conn, Frames.tcp(conn.localPort, conn.remotePort, { ACK: 1 }, conn.seq, conn.ack), 0);
         conn.state = 'TIME_WAIT'; this._mslTimer(conn);
-        NS.log(`${dev.name}: 四次挥手完成，进入 TIME_WAIT`, 'ok');
+        NS.log({ zh: `${dev.name}: 四次挥手完成，进入 TIME_WAIT`, en: `${dev.name}: Four-way close complete. Entering TIME_WAIT` }, 'ok');
       },
 
       /* 服务端应用：HTTP / Telnet */
@@ -616,7 +686,7 @@
         if (svc === 'http') {
           let gotReq = false;
           return {
-            onOpen(conn) { NS.log(`${dev.name}: HTTP 客户端接入`, 'info'); },
+            onOpen(conn) { NS.log({ zh: `${dev.name}: HTTP 客户端接入`, en: `${dev.name}: HTTP client connected` }, 'info'); },
             onData(conn, data) {
               if (!gotReq) {
                 gotReq = true;
@@ -635,7 +705,7 @@
           onData(conn, data) {
             const line = (data || '').trim();
             if (line.toLowerCase() === 'quit') {
-              send(conn, 'Goodbye.\r\n');            /* 客户端收到后主动挥手 */
+              send(conn, 'Goodbye.\r\n');            /* quit 的回显 */
             } else {
               send(conn, `[${dev.name}] echo: ${line}\r\n`);
             }
@@ -682,27 +752,27 @@
       const newTtl = ip.ttl - 1;
 
       if (newTtl <= 0) {
-        NS.log(`${dev.name}: TTL 超时，向 ${ip.src} 发送 ICMP Time Exceeded`, 'warn');
+        NS.log({ zh: `${dev.name}: TTL 超时，向 ${ip.src} 发送 ICMP Time Exceeded`, en: `${dev.name}: TTL expired. Sending ICMP Time Exceeded to ${ip.src}` }, 'warn');
         this.sendIcmpError(dev, inIf, ipPkt, 11, 0);
         return;
       }
 
       const r = this.routerRoute(dev, ip.dst);
       if (r.err) {
-        NS.log(`${dev.name}: 无到 ${ip.dst} 的路由，发送 ICMP 不可达(code 0)`, 'warn');
+        NS.log({ zh: `${dev.name}: 无到 ${ip.dst} 的路由，发送 ICMP 不可达(code 0)`, en: `${dev.name}: No route to ${ip.dst}. Sending ICMP Destination Unreachable (code 0)` }, 'warn');
         this.sendIcmpError(dev, inIf, ipPkt, 3, 0);
         return;
       }
 
       this.arpResolve(dev, r.ifce, r.nextHop, (err, mac) => {
         if (err) {   // 最后一级 ARP 失败 → host unreachable
-          NS.log(`${dev.name}: 下一跳 ${r.nextHop} ARP 失败，发送 ICMP 不可达(code 1)`, 'warn');
+          NS.log({ zh: `${dev.name}: 下一跳 ${r.nextHop} ARP 失败，发送 ICMP 不可达(code 1)`, en: `${dev.name}: ARP for next hop ${r.nextHop} failed. Sending ICMP Destination Unreachable (code 1)` }, 'warn');
           this.sendIcmpError(dev, inIf, ipPkt, 3, 1);
           return;
         }
         const forwarded = { ...ipPkt, ip: { ...ip, ttl: newTtl } };
         Net.tx(dev, r.ifce, { eth: { dst: mac, src: r.ifce.mac, type: 'IPv4' }, payload: forwarded, len: 34 + (l4 ? l4.len : 0) });
-        NS.log(`${dev.name}: 转发 → ${ip.dst} (TTL=${newTtl}, 下一跳 ${r.nextHop})`, 'info');
+        NS.log({ zh: `${dev.name}: 转发 → ${ip.dst} (TTL=${newTtl}, 下一跳 ${r.nextHop})`, en: `${dev.name}: Forwarding to ${ip.dst} (TTL=${newTtl}, next hop ${r.nextHop})` }, 'info');
       });
     },
 
@@ -730,17 +800,18 @@
         if (!dev.on || !port) return;
         const src = frame.eth.src;
         if (!IP.isBroadcast(src)) {                  // 学习源 MAC
-          dev.macTable.set(src, { port: port.name, t: Engine.time });
+          learnAddress(dev, dev.macTable, src, { port: port.name }, this.MAC_AGE);
           Bus.emit('device:changed', dev.id);
         }
         const dst = frame.eth.dst;
         const hit = IP.isBroadcast(dst) ? null : dev.macTable.get(dst);
-        if (hit && Engine.time - hit.t <= this.MAC_AGE) {
+        if (hit && Engine.time - hit.t < this.MAC_AGE) {
           if (hit.port !== port.name) {              // 已知单播：仅发对应端口
             const outIf = dev.getInterface(hit.port);
             if (outIf) Net.tx(dev, outIf, frame);
           }
         } else {                                     // 未知/广播：泛洪
+          if (hit) dev.macTable.delete(dst);
           dev.interfaces.filter(i => i.name !== port.name && i.linkId).forEach(outIf => Net.tx(dev, outIf, frame));
         }
       };

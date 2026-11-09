@@ -29,7 +29,9 @@
     entries: [],
     max: 1200,
     log(msg, level) {
-      const e = { t: NS.Engine.time, level: level || 'info', msg };
+      const e = { t: NS.Engine.time, level: level || 'info',
+        get msg() { return typeof msg === 'string' ? msg : msg[NS.I18N.lang]; },
+      };
       this.entries.push(e);
       if (this.entries.length > this.max) this.entries.shift();
       Bus.emit('log', e);

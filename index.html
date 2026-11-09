@@ -3,6 +3,8 @@
 <head>
 <meta charset="UTF-8">
 <meta name="viewport" content="width=device-width, initial-scale=1.0">
+<meta name="color-scheme" content="dark light">
+<script>/* 首帧前恢复主题，避免闪烁 */try{if(localStorage.getItem('ns.theme')==='light'){var h=document.documentElement;h.classList.add('light');h.style.colorScheme='light';}}catch(e){}</script>
 <title>网络模拟器 | Network Simulator</title>
 <link rel="stylesheet" href="css/style.css">
 </head>
@@ -37,7 +39,7 @@
   </div>
 
   <div class="tb-group" id="tb-sim">
-    <button id="btn-run" data-i18n-title="tb.run">▶</button>
+    <button id="btn-run">▶</button>
     <button id="btn-step" data-i18n-title="tb.step">⏭</button>
     <select id="sel-speed" data-i18n-title="tb.speed">
       <option value="0.1">0.1×</option>
@@ -53,15 +55,16 @@
   <div class="tb-group" id="tb-file">
     <button id="btn-export" data-i18n="tb.export">导出</button>
     <button id="btn-import" data-i18n="tb.import">导入</button>
-    <button id="btn-restore" data-i18n="tb.restore" data-i18n-title="tb.restore" hidden>恢复备份</button>
+    <button id="btn-restore" data-i18n="tb.restore" disabled>恢复上一拓扑</button>
     <button id="btn-new" class="danger" data-i18n="tb.new">清空</button>
     <input type="file" id="file-import" accept=".json" hidden>
   </div>
 
   <div class="tb-spacer"></div>
 
-  <div class="tb-group">
+  <div class="tb-group" id="tb-tools">
     <button id="btn-labs" data-i18n="tb.labs">实验</button>
+    <button id="btn-theme" data-i18n-title="tb.theme">☀️</button>
     <button id="btn-lang">中 / EN</button>
     <button id="btn-help" data-i18n="tb.help">帮助</button>
   </div>
@@ -79,8 +82,8 @@
   <div id="canvas-wrap">
     <svg id="canvas" xmlns="http://www.w3.org/2000/svg">
       <defs>
-        <pattern id="grid" width="28" height="28" patternUnits="userSpaceOnUse">
-          <path d="M28 0H0V28" fill="none" stroke="#e7ecf2" stroke-width="1"/>
+        <pattern id="grid" width="26" height="26" patternUnits="userSpaceOnUse">
+          <circle cx="1.3" cy="1.3" r="1.3" fill="#172238"/>
         </pattern>
       </defs>
       <rect id="canvas-bg" x="0" y="0" width="4000" height="2600" fill="url(#grid)"/>
@@ -135,24 +138,12 @@
 </div>
 
 <!-- 弹层：帮助 -->
-<div id="modal-help" class="modal hidden">
+<dialog id="modal-help" class="modal" aria-labelledby="help-title">
   <div class="modal-box">
-    <div class="modal-head"><span data-i18n="help.title">使用帮助</span><button class="modal-close">✕</button></div>
+    <div class="modal-head"><span id="help-title" data-i18n="help.title">使用帮助</span><button class="modal-close" data-i18n-title="ui.close" autofocus>✕</button></div>
     <div id="help-body" class="modal-body"></div>
   </div>
-</div>
-
-<!-- 弹层：确认 -->
-<div id="modal-confirm" class="modal hidden">
-  <div class="modal-box">
-    <div class="modal-head"><span id="confirm-title"></span><button class="modal-close">✕</button></div>
-    <div class="modal-body" id="confirm-body"></div>
-    <div class="modal-foot">
-      <button id="confirm-cancel" class="modal-btn"></button>
-      <button id="confirm-ok" class="modal-btn primary"></button>
-    </div>
-  </div>
-</div>
+</dialog>
 
 <div id="toast-container"></div>
 

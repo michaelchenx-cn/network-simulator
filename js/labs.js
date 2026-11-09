@@ -8,8 +8,18 @@
   function cfg(dev, ifName, ip, mask, gw) { dev.setIfConfig(ifName, { ip, mask, gw: gw || '' }); }
 
   /* ping 型验收 */
-  function pingCheck(from, targetIp, done) {
-    return NS.Proto.icmpEcho(from, targetIp, { timeout: 3000 }, res => done(res.kind === 'reply'));
+  function pingCheck(from, targetIp, done, expectedResponder) {
+    return NS.Proto.icmpEcho(from, targetIp, { timeout: 3000, expectedResponder }, res => done(res.kind === 'reply'));
+  }
+
+  function sameSubnetPCs() {
+    const [a, b] = [...NS.world.devices.values()].filter(d => d.type === 'pc');
+    const source = a?.interfaces[0], target = b?.interfaces[0];
+    const IP = NS.IP;
+    if (!source || !target || source.ip === target.ip) return null;
+    if (!IP.validUnicast(source.ip) || !IP.validUnicast(target.ip)) return null;
+    if (!IP.inSubnet(source.ip, target.ip, source.mask) || !IP.inSubnet(source.ip, target.ip, target.mask)) return null;
+    return { a, b, target };
   }
 
   const LABS = [
@@ -43,20 +53,14 @@
       checks: [
         {
           label: { zh: '两台 PC 已配置同网段 IP', en: 'Both PCs have IPs in the same subnet' },
-          run(done) {
-            const pcs = [...NS.world.devices.values()].filter(d => d.type === 'pc');
-            if (pcs.length < 2) return done(false);
-            const [a, b] = pcs;
-            done(!!(a.interfaces[0].ip && b.interfaces[0].ip &&
-              NS.IP.inSubnet(a.interfaces[0].ip, b.interfaces[0].ip, a.interfaces[0].mask)));
-          },
+          run(done) { done(Boolean(sameSubnetPCs())); },
         },
         {
           label: { zh: 'PC1 → PC2 ping 连通', en: 'PC1 → PC2 ping succeeds' },
           run(done) {
-            const pcs = [...NS.world.devices.values()].filter(d => d.type === 'pc');
-            if (pcs.length < 2) return done(false);
-            return pingCheck(pcs[0], pcs[1].interfaces[0].ip, done);
+            const pair = sameSubnetPCs();
+            if (!pair || !pair.a.on || !pair.b.on) return done(false);
+            return pingCheck(pair.a, pair.target.ip, done, pair.b);
           },
         },
       ],
@@ -148,14 +152,13 @@
         { label: { zh: 'Switch1 MAC 表已学习 ≥ 3 条', en: 'Switch1 learned ≥ 3 MAC entries' },
           run(done) {
             const sw = [...NS.world.devices.values()].find(d => d.type === 'switch');
-            done(!!(sw && sw.macTable.size >= 3));
+            done(!!(sw && NS.Proto.macEntries(sw).length >= 3));
           } },
         { label: { zh: 'PC1 的 ARP 缓存中有 PC2 与 PC3', en: 'PC1 ARP cache has PC2 and PC3' },
           run(done) {
             const pc1 = [...NS.world.devices.values()].find(d => d.name === 'PC1');
-            if (!pc1 || !pc1.arpCaches) return done(false);
-            const cache = pc1.arpCaches.get('eth0');
-            done(!!(cache && cache.has('192.168.1.20') && cache.has('192.168.1.30')));
+            if (!pc1) return done(false);
+            done(Boolean(NS.Proto.arpLookup(pc1, 'eth0', '192.168.1.20') && NS.Proto.arpLookup(pc1, 'eth0', '192.168.1.30')));
           } },
       ],
     },
@@ -256,17 +259,25 @@
     },
   ];
 
+  const topologySignature = ({ devices, links }) => JSON.stringify({ devices, links });
+
   const Labs = {
     active: null,
+    builtSnapshot: null,
     _checkRun: null,
 
     init() {
       NS.I18N.onChange(() => { this.renderList(); this.renderActive(); });
       NS.Bus.on('world:cleared', () => {
-        this.stopChecks();
-        document.getElementById('lab-checks')?.replaceChildren();
+        this.active = null;
+        this.builtSnapshot = null;
+        this.renderActive();
       });
       this.renderList();
+    },
+
+    isPristineTopology(topology) {
+      return this.builtSnapshot === topologySignature(topology);
     },
 
     renderList() {
@@ -287,29 +298,14 @@
 
     load(id) {
       const lab = LABS.find(l => l.id === id);
-      if (!lab) return;
-      const doLoad = () => {
-        const backed = NS.Backup && NS.Backup.snapshot();
-        if (backed) NS.toast && NS.toast(NS.t('toast.backedUp'), 'info');
-        this.active = lab;
-        NS.world.clear();               /* 实验替换整个拓扑，必须先清空 */
-        lab.build();
-        this.builtSnapshot = NS._topoSig(NS.saveTopology());   // 供备份防覆盖比较
-        NS.Canvas.select(null);
-        NS.toast && NS.toast(NS.t('toast.labLoad') + ' · ' + pick(lab.title), 'ok');
-        this.renderActive();
-        /* 窄屏下侧栏是浮层会盖住画布：加载后收起，让拓扑露出来 */
-        const panel = document.getElementById('labs-panel');
-        if (window.matchMedia && matchMedia('(max-width: 1080px)').matches) panel.classList.add('collapsed');
-        else panel.classList.remove('collapsed');
-      };
-      /* 画布非空时先确认 + 自动备份，防止用户配置被静默清掉 */
-      if (!NS.world.devices.size || !NS.confirm) { doLoad(); return; }
-      NS.confirm({
-        title: NS.t('confirm.loadLabTitle'),
-        body: NS.t('confirm.loadLabBody'),
-        ok: NS.t('confirm.loadLabTitle'),
-      }).then((yes) => { if (yes) doLoad(); });
+      if (!lab || !NS.App.confirmReplacement('toast.confirmLab')) return;
+      NS.world.clear();                 /* 实验替换整个拓扑，必须先清空 */
+      lab.build();
+      this.active = lab;
+      this.builtSnapshot = topologySignature(NS.saveTopology());
+      NS.toast && NS.toast(NS.t('toast.labLoad') + ' · ' + pick(lab.title), 'ok');
+      this.renderActive();
+      document.getElementById('labs-panel').classList.toggle('collapsed', window.matchMedia('(max-width: 1080px)').matches);
     },
 
     renderActive() {

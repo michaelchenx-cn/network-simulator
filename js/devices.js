@@ -20,7 +20,12 @@
       this.devices.delete(id);
       NS.Bus.emit('world:changed');
     },
-    addLink(l) { this.links.set(l.id, l); NS.Bus.emit('world:changed'); return l; },
+    addLink(l) {
+      this.links.set(l.id, l);
+      NS.Bus.emit('world:changed');
+      reportConflicts(l.endpoints()[0].ifce);
+      return l;
+    },
     removeLink(id) {
       const l = this.links.get(id); if (!l) return;
       [l.a, l.b].forEach(end => {
@@ -59,14 +64,62 @@
   NS.world = world;
 
   let counters = { pc: 0, router: 0, switch: 0, server: 0, mac: 0, link: 0 };
+  let nextDeviceId = 0;
 
-  const TYPE_NAME = { pc: 'PC', router: 'R', switch: 'SW', server: 'SRV' };
+  function genDeviceId(type) {
+    let id;
+    do {
+      id = `${type[0]}-${Date.now().toString(36)}-${(++nextDeviceId).toString(36)}`;
+    } while (world.devices.has(id) || counters.importIds?.has(id));
+    return id;
+  }
+
+  /* 交换机端口和网线连接同一广播域，路由器的各接口彼此独立。 */
+  function addressConflicts(devices, links, onlyInterface) {
+    const visited = new Set();
+    const conflicts = [];
+    for (const dev of devices.values()) for (const ifce of dev.interfaces) {
+      if (visited.has(ifce) || (onlyInterface && ifce !== onlyInterface)) continue;
+      const seen = { IP: new Map(), MAC: new Map() };
+      const pending = [[dev, ifce]];
+      while (pending.length) {
+        const [owner, port] = pending.pop();
+        if (visited.has(port)) continue;
+        visited.add(port);
+        const name = `${owner.name} · ${port.name}`;
+        for (const [kind, address] of [['IP', port.ip], ['MAC', port.mac]]) {
+          if (!address) continue;
+          const first = seen[kind].get(address);
+          if (first) conflicts.push({ kind, address, first, second: name });
+          else seen[kind].set(address, name);
+        }
+        const link = links.get(port.linkId);
+        if (link) {
+          const end = link.otherEnd(owner.id);
+          const peer = devices.get(end.dev);
+          const peerPort = peer?.getInterface(end.ifName);
+          if (peerPort) pending.push([peer, peerPort]);
+        }
+        if (owner.type === 'switch') owner.interfaces.forEach(i => pending.push([owner, i]));
+      }
+    }
+    return conflicts;
+  }
+
+  function reportConflicts(ifce) {
+    const conflicts = addressConflicts(world.devices, world.links, ifce);
+    if (conflicts.length) NS.Bus.emit('address:conflict', conflicts);
+  }
 
   function genMac() {
-    counters.mac++;
-    const n = counters.mac;
+    const occupied = counters.importMacs ?? new Set([...world.devices.values()].flatMap(d => d.interfaces.map(i => i.mac)));
     const hex = (x) => x.toString(16).toUpperCase().padStart(2, '0');
-    return `00:50:56:${hex((n >> 16) & 0x7F | 0x20)}:${hex((n >> 8) & 0xFF)}:${hex(n & 0xFF)}`;
+    let mac;
+    do {
+      const n = ++counters.mac;
+      mac = `00:50:56:${hex((n >> 16) & 0x7F | 0x20)}:${hex((n >> 8) & 0xFF)}:${hex(n & 0xFF)}`;
+    } while (occupied.has(mac));
+    return mac;
   }
 
   class Interface {
@@ -98,7 +151,7 @@
 
   class Device {
     constructor(type, x, y) {
-      this.id = type[0] + Date.now().toString(36) + Math.floor(Math.random() * 1000);
+      this.id = genDeviceId(type);
       this.type = type;                    // pc | router | switch | server
       counters[type]++;
       this.name = (type === 'pc' ? 'PC' : type === 'router' ? 'Router' : type === 'switch' ? 'Switch' : 'Server') + counters[type];
@@ -143,16 +196,20 @@
         NS.Terminals?.interruptOnPowerOff(this.id);
         this.powerOffCleanup?.();
       }
-      NS.log(`${this.name}: ${v ? '开机' : '关机'}`, v ? 'ok' : 'warn');
+      NS.log({ zh: `${this.name}: ${v ? '开机' : '关机'}`, en: `${this.name}: ${v ? 'Powered on' : 'Powered off'}` }, v ? 'ok' : 'warn');
       NS.Bus.emit('device:changed', this.id);
       NS.Bus.emit('topology:touched');
     }
 
     applyServices() {                      // server: 同步监听端口
-      const P = Proto();
-      if (this.type === 'server') {
-        if (this.services.http) P.tcp.listen(this, 80, 'http'); else P.tcp.unlisten(this, 80);
-        if (this.services.telnet) P.tcp.listen(this, 23, 'telnet'); else P.tcp.unlisten(this, 23);
+      if (this.type !== 'server') return;
+      const listeners = Proto().tcp.listenersOf(this);
+      for (const [service, port] of [['http', 80], ['telnet', 23]]) {
+        if (this.services[service]) listeners.set(port, service);
+        else listeners.delete(port);
+      }
+      if (world.devices.get(this.id) === this) {
+        NS.Bus.emit('device:changed', this.id);
         NS.Bus.emit('topology:touched');
       }
     }
@@ -160,25 +217,32 @@
     setIfConfig(ifName, { ip, mask, gw }) {
       const ifce = this.getInterface(ifName); if (!ifce) return 'noif';
       const IP = NS.IP;
-      if (ip && !IP.valid(ip)) return 'badip';
-      if (mask && !IP.validMask(mask)) return 'badip';
-      if (gw && !IP.valid(gw)) return 'badip';
-      const changedNetwork = (ip !== undefined && ip !== ifce.ip) || (mask !== undefined && mask !== ifce.mask);
+      if (ip !== undefined && ip !== '' && !IP.validUnicast(ip)) return 'badip';
+      if (mask !== undefined && mask !== '' && !IP.validMask(mask)) return 'badip';
+      if (gw !== undefined && gw !== '' && !IP.validUnicast(gw)) return 'badip';
+      if (ip) ip = IP.normalize(ip);
+      if (mask) mask = IP.normalize(mask);
+      if (gw) gw = IP.normalize(gw);
+      const changedIp = ip !== undefined && ip !== ifce.ip;
+      const changedNetwork = changedIp || (mask !== undefined && mask !== ifce.mask);
       if (ip !== undefined) ifce.ip = ip;
       if (mask !== undefined) ifce.mask = mask;
       if (gw !== undefined) ifce.gw = gw;
       /* IP 变化后清 ARP（与真实系统一致） */
       if (changedNetwork || ip === '') {
-        if (this.arpCaches) this.arpCaches.delete(ifName);
+        this.arpCaches?.get(ifName)?.clear();
+        this.arpCaches?.delete(ifName);
       }
       NS.Bus.emit('device:changed', this.id);
       NS.Bus.emit('topology:touched');
+      if (changedIp && ip && world.devices.get(this.id) === this) reportConflicts(ifce);
       return null;
     }
 
     addRoute(dest, mask, nh) {
-      if (!NS.IP.valid(dest) || !NS.IP.validMask(mask) || !NS.IP.valid(nh)) return false;
-      this.staticRoutes.push({ dest, mask, nh });
+      const IP = NS.IP;
+      if (!IP.valid(dest) || !IP.validMask(mask) || !IP.validUnicast(nh)) return false;
+      this.staticRoutes.push({ dest: IP.normalize(dest), mask: IP.normalize(mask), nh: IP.normalize(nh) });
       NS.Bus.emit('device:changed', this.id);
       NS.Bus.emit('topology:touched');
       return true;
@@ -218,11 +282,13 @@
       d.id = o.id || d.id;
       if (o.ifaces && o.ifaces.length) d.interfaces = o.ifaces.map(i => {
         const ifce = new Interface(i.name || 'eth0');
-        ifce.mac = i.mac || ifce.mac;
-        ifce.ip = i.ip || ''; ifce.mask = i.mask || ''; ifce.gw = i.gw || '';
+        ifce.mac = i.mac?.toUpperCase() || ifce.mac;
+        ifce.ip = NS.IP.normalize(i.ip); ifce.mask = NS.IP.normalize(i.mask); ifce.gw = NS.IP.normalize(i.gw);
         return ifce;
       });
-      if (type !== 'switch') d.staticRoutes = (o.staticRoutes || []).map(r => ({ ...r }));
+      if (type !== 'switch') d.staticRoutes = (o.staticRoutes || []).map(({ dest, mask, nh }) => ({
+        dest: NS.IP.normalize(dest), mask: NS.IP.normalize(mask), nh: NS.IP.normalize(nh),
+      }));
       if (type === 'server') { d.services = { http: !!(o.services && o.services.http), telnet: !!(o.services && o.services.telnet) }; d.applyServices(); }
       return d;
     }
@@ -248,7 +314,7 @@
     const object = value => value && typeof value === 'object' && !Array.isArray(value);
     const optionalString = value => value === undefined || typeof value === 'string';
     const optionalBool = value => value === undefined || typeof value === 'boolean';
-    const optionalAddress = value => value === undefined || value === '' || NS.IP.valid(value);
+    const optionalAddress = value => value === undefined || value === '' || NS.IP.validUnicast(value);
     const optionalMask = value => value === undefined || value === '' || NS.IP.validMask(value);
     if (!object(data) || (data.version !== undefined && data.version !== 1) || !Array.isArray(data.devices)) return false;
     if (data.links !== undefined && !Array.isArray(data.links)) return false;
@@ -266,7 +332,7 @@
       }
       if (d.staticRoutes !== undefined && !Array.isArray(d.staticRoutes)) return false;
       for (const r of (d.staticRoutes || [])) {
-        if (!object(r) || !NS.IP.valid(r.dest) || !NS.IP.validMask(r.mask) || !NS.IP.valid(r.nh)) return false;
+        if (!object(r) || !NS.IP.valid(r.dest) || !NS.IP.validMask(r.mask) || !NS.IP.validUnicast(r.nh)) return false;
       }
       if (d.services !== undefined && (!object(d.services) || !optionalBool(d.services.http) || !optionalBool(d.services.telnet))) return false;
     }
@@ -280,22 +346,18 @@
     return true;
   }
 
-  NS.loadTopology = (data) => {
+  NS.loadTopology = (data, { beforeReplace = conflicts => !conflicts.length } = {}) => {
     if (!validTopology(data)) return false;
     const previousCounters = counters;
     counters = { pc: 0, router: 0, switch: 0, server: 0, mac: 0, link: 0 };
+    counters.importIds = new Set(data.devices.map(d => d.id));
+    counters.importMacs = new Set(data.devices.flatMap(d => (d.ifaces || []).map(i => i.mac?.toUpperCase())));
     const devices = new Map(), links = new Map();
     try {
       data.devices.forEach(o => {
         const d = NS.Device.fromJSON(o);
         if (devices.has(d.id)) throw new Error('Duplicate device ID');
         devices.set(d.id, d);
-        // 导入后继续生成接口时，避开文件中已有的自动分配 MAC。
-        for (const i of d.interfaces) {
-          if (/^00:50:56:[2-7][0-9a-f]:/i.test(i.mac)) {
-            counters.mac = Math.max(counters.mac, parseInt(i.mac.split(':').slice(3).join(''), 16) & 0x1FFFFF);
-          }
-        }
       });
       (data.links || []).forEach(lo => {
         const dA = devices.get(lo.a.dev), dB = devices.get(lo.b.dev);
@@ -314,11 +376,17 @@
       return false;
     }
     const importedCounters = counters;
+    delete importedCounters.importMacs;
+    delete importedCounters.importIds;
+    counters = previousCounters;
+    const conflicts = addressConflicts(devices, links);
+    if (!beforeReplace(conflicts)) return false;
     world.clear();
     counters = importedCounters;
     devices.forEach(d => world.devices.set(d.id, d));
     links.forEach(l => world.links.set(l.id, l));
     NS.Bus.emit('world:changed');
+    if (conflicts.length) NS.Bus.emit('address:conflict', conflicts);
     return true;
   };
 })(typeof window !== 'undefined' ? window : globalThis);

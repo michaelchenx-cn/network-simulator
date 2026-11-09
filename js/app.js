@@ -2,6 +2,14 @@
 (function (root) {
   const NS = root.NS = root.NS || {};
   const $ = (id) => document.getElementById(id);
+  let backup = null;
+
+  function conflictMessage(conflicts) {
+    const lines = conflicts.slice(0, 5).map(({ kind, address, first, second }) =>
+      `${kind} ${address} · ${first} ↔ ${second}`);
+    if (conflicts.length > lines.length) lines.push(`… (+${conflicts.length - lines.length})`);
+    return [NS.t('toast.addressConflict'), ...lines].join('\n');
+  }
 
   /* ── Toast ── */
   NS.toast = (msg, type = 'info', duration = 3200) => {
@@ -12,70 +20,6 @@
     d.style.whiteSpace = 'pre-line';
     box.appendChild(d);
     setTimeout(() => { d.style.opacity = '0'; d.style.transition = 'opacity .3s'; setTimeout(() => d.remove(), 320); }, duration);
-  };
-
-  /* ── 确认对话框（Promise 风格，✕ / 遮罩 / 取消 = false） ── */
-  NS.confirm = (opts = {}) => new Promise((resolve) => {
-    const modal = $('modal-confirm');
-    const okBtn = $('confirm-ok'), cancelBtn = $('confirm-cancel');
-    const closeBtn = modal.querySelector('.modal-close');
-    $('confirm-title').textContent = opts.title || NS.t('ui.confirm');
-    $('confirm-body').textContent = opts.body || '';
-    okBtn.textContent = opts.ok || NS.t('ui.confirm');
-    cancelBtn.textContent = opts.cancel || NS.t('ui.cancel');
-    const close = (v) => {
-      modal.classList.add('hidden');
-      okBtn.removeEventListener('click', onOk);
-      cancelBtn.removeEventListener('click', onCancel);
-      closeBtn.removeEventListener('click', onClose);
-      modal.removeEventListener('click', onMask);
-      resolve(v);
-    };
-    const onOk = () => close(true), onCancel = () => close(false), onClose = () => close(false);
-    const onMask = (e) => { if (e.target === modal) close(false); };
-    okBtn.addEventListener('click', onOk);
-    cancelBtn.addEventListener('click', onCancel);
-    closeBtn.addEventListener('click', onClose);
-    modal.addEventListener('click', onMask);
-    modal.classList.remove('hidden');
-  });
-
-  /* ── 拓扑签名（忽略 savedAt，用于比较“是否还是实验初始拓扑”） ── */
-  NS._topoSig = (t) => JSON.stringify({ devices: (t && t.devices) || [], links: (t && t.links) || [] });
-
-  /* ── 拓扑备份：破坏性操作（加载实验 / 清空）前自动备份，工具栏一键恢复 ── */
-  const BACKUP_KEY = 'ns.topo.backup';
-  NS.Backup = {
-    exists: () => { try { return !!localStorage.getItem(BACKUP_KEY); } catch (e) { return false; } },
-    snapshot() {
-      try {
-        const cur = NS.saveTopology();
-        if (!cur.devices.length) return false;                       // 空画布无需备份
-        /* 当前仍是某实验刚建成的拓扑且已有备份 → 不覆盖（防止连做实验顶掉最初的自建配置） */
-        if (NS.Labs && NS.Labs.builtSnapshot && this.exists()
-          && NS._topoSig(cur) === NS.Labs.builtSnapshot) return false;
-        localStorage.setItem(BACKUP_KEY, JSON.stringify(cur));
-        this.refresh();
-        return true;
-      } catch (e) { return false; }
-    },
-    restore() {
-      try {
-        const s = localStorage.getItem(BACKUP_KEY);
-        if (!s) return false;
-        const ok = NS.loadTopology(JSON.parse(s));
-        if (ok) {
-          /* 恢复的是用户自己的拓扑，退出当前实验上下文 */
-          if (NS.Labs) { NS.Labs.active = null; NS.Labs.renderActive(); NS.Labs.renderList(); }
-          NS.Canvas.select(null);
-        }
-        return ok;
-      } catch (e) { return false; }
-    },
-    refresh() {
-      const b = $('btn-restore');
-      if (b) b.hidden = !this.exists();
-    },
   };
 
   const App = {
@@ -105,9 +49,34 @@
       } else if (name === 'log') {
         const b = document.createElement('button');
         b.textContent = NS.t('log.clear');
-        b.addEventListener('click', () => { NS.Logger.clear(); $('log-area').innerHTML = ''; });
+        b.addEventListener('click', () => NS.Logger.clear());
         box.appendChild(b);
       }
+    },
+
+    confirmReplacement(key, conflicts = []) {
+      const current = NS.world.devices.size ? NS.saveTopology() : null;
+      const shouldBackUp = current && (!backup || !NS.Labs.isPristineTopology(current));
+      const messages = [];
+      if (current || key === 'toast.confirmRestore') messages.push(NS.t(key));
+      if (current) messages.push(NS.t(shouldBackUp ? 'toast.replaceEffects' : 'toast.replaceKeepBackup'));
+      if (conflicts.length) messages.push(conflictMessage(conflicts), NS.t('toast.conflictContinue'));
+      if (messages.length && !window.confirm(messages.join('\n\n'))) return false;
+      if (shouldBackUp) {
+        backup = current;
+        try { localStorage.setItem('ns.topo.backup', JSON.stringify(backup)); } catch (e) {}
+        $('btn-restore').disabled = false;
+      }
+      return true;
+    },
+
+    replaceFromData(data, promptKey, successKey, errorKey) {
+      let cancelled = false;
+      const ok = NS.loadTopology(data, { beforeReplace: (conflicts) => {
+        cancelled = !this.confirmReplacement(promptKey, conflicts);
+        return !cancelled;
+      } });
+      if (!cancelled) NS.toast(NS.t(ok ? successKey : errorKey), ok ? 'ok' : 'err');
     },
 
     /* ── 帮助内容 ── */
@@ -177,9 +146,7 @@
       NS.Sniffer.init();
       NS.Sniffer.bind();
       NS.Labs.init();
-      NS.Backup.refresh();               // 有备份则显示【恢复备份】按钮
       NS.Inspector.show(null);
-      NS.SimLoop.start();
 
       /* ── 工具栏 ── */
       document.querySelectorAll('.pal-btn').forEach(b => b.addEventListener('click', () => NS.Canvas.setPlace(b.dataset.place)));
@@ -190,22 +157,40 @@
       $('btn-step').addEventListener('click', () => NS.SimLoop.step());
       $('sel-speed').addEventListener('change', (e) => NS.SimLoop.setSpeed(+e.target.value));
       $('btn-labs').addEventListener('click', () => $('labs-panel').classList.toggle('collapsed'));
+      /* ── 明暗主题（head 内联脚本已按 localStorage 预设 html class，避免首帧闪烁） ── */
+      const applyTheme = () => {
+        const light = document.documentElement.classList.contains('light');
+        document.documentElement.style.colorScheme = light ? 'light' : 'dark';
+        $('btn-theme').textContent = light ? '🌙' : '☀️';
+      };
+      $('btn-theme').addEventListener('click', () => {
+        document.documentElement.classList.toggle('light');
+        try { localStorage.setItem('ns.theme', document.documentElement.classList.contains('light') ? 'light' : 'dark'); } catch (e) {}
+        applyTheme();
+      });
+      applyTheme();
       $('btn-lang').addEventListener('click', () => {
         NS.I18N.toggle();
         $('btn-lang').textContent = NS.I18N.lang === 'zh' ? '中 / EN' : 'EN / 中';
       });
       $('btn-help').addEventListener('click', () => {
         $('help-body').innerHTML = App.helpHtml();
-        $('modal-help').classList.remove('hidden');
+        $('modal-help').showModal();
       });
-      document.querySelector('#modal-help .modal-close').addEventListener('click', () => $('modal-help').classList.add('hidden'));
-      $('modal-help').addEventListener('click', (e) => { if (e.target.id === 'modal-help') $('modal-help').classList.add('hidden'); });
+      document.querySelector('#modal-help .modal-close').addEventListener('click', () => $('modal-help').close());
+      $('modal-help').addEventListener('click', (e) => { if (e.target === $('modal-help')) $('modal-help').close(); });
 
       /* 仿真状态按钮 */
-      NS.Bus.on('sim:state', (run) => {
-        $('btn-run').textContent = run ? '⏸' : '▶';
-        $('btn-run').classList.toggle('running', run);
-      });
+      const runButton = $('btn-run');
+      const renderRunState = () => {
+        const running = NS.Engine.running;
+        const label = NS.t(running ? 'tb.pause' : 'tb.run');
+        runButton.textContent = running ? '⏸' : '▶';
+        runButton.classList.toggle('running', running);
+        runButton.title = label;
+        runButton.setAttribute('aria-label', label);
+      };
+      NS.Bus.on('sim:state', renderRunState);
 
       /* 导出 / 导入 / 清空 */
       $('btn-export').addEventListener('click', () => {
@@ -219,36 +204,33 @@
         NS.toast(NS.t('toast.exported'), 'ok');
       });
       $('btn-import').addEventListener('click', () => $('file-import').click());
-      $('btn-restore').addEventListener('click', async () => {
-        if (!NS.Backup.exists()) { NS.Backup.refresh(); NS.toast(NS.t('toast.noBackup'), 'warn'); return; }
-        const yes = await NS.confirm({ title: NS.t('confirm.restoreTitle'), body: NS.t('confirm.restoreBody') });
-        if (!yes) return;
-        const ok = NS.Backup.restore();
-        NS.toast(ok ? NS.t('toast.restored') : NS.t('toast.noBackup'), ok ? 'ok' : 'err');
-      });
+      let currentReader;
       $('file-import').addEventListener('change', (e) => {
         const f = e.target.files[0];
         if (!f) return;
-        const rd = new FileReader();
+        const rd = currentReader = new FileReader();
         rd.onload = () => {
+          if (rd !== currentReader) return;
           try {
-            const ok = NS.loadTopology(JSON.parse(rd.result));
-            NS.toast(ok ? NS.t('toast.imported') : NS.t('toast.importErr'), ok ? 'ok' : 'err');
-            if (ok) NS.Canvas.select(null);
+            this.replaceFromData(JSON.parse(rd.result), 'toast.confirmImport', 'toast.imported', 'toast.importErr');
           } catch (err) { NS.toast(NS.t('toast.importErr'), 'err'); }
         };
+        rd.onerror = () => { if (rd === currentReader) NS.toast(NS.t('toast.importErr'), 'err'); };
         rd.readAsText(f);
         e.target.value = '';
       });
+      try { backup = JSON.parse(localStorage.getItem('ns.topo.backup')); } catch (e) {}
+      $('btn-restore').disabled = !backup;
+      $('btn-restore').addEventListener('click', () => {
+        if (backup) this.replaceFromData(backup, 'toast.confirmRestore', 'toast.restored', 'toast.restoreErr');
+      });
       $('btn-new').addEventListener('click', () => {
-        if (confirm(NS.t('toast.confirmNew'))) {
-          NS.Backup.snapshot();          // 清空同为破坏性操作，先备份再清
+        if (this.confirmReplacement('toast.confirmNew')) {
           NS.world.clear();
-          NS.Terminals.closeAll();
-          NS.Canvas.select(null);
           NS.toast(NS.t('toast.cleared'), 'ok');
         }
       });
+      NS.Bus.on('address:conflict', (conflicts) => NS.toast(conflictMessage(conflicts), 'warn', 6500));
 
       /* 画布缩放按钮 */
       $('zoom-in').addEventListener('click', () => NS.Canvas.zoomAt(1.25, 300, 200));
@@ -277,7 +259,7 @@
       window.addEventListener('pointerup', () => { rz = null; placeResizer(); });
 
       /* 事件日志 */
-      NS.Bus.on('log', (e) => {
+      const renderLog = (e) => {
         const area = $('log-area');
         if (!area) return;
         const d = document.createElement('div');
@@ -287,7 +269,9 @@
         area.appendChild(d);
         while (area.children.length > 1000) area.removeChild(area.firstChild);
         area.scrollTop = area.scrollHeight;
-      });
+      };
+      NS.Bus.on('log', renderLog);
+      NS.Bus.on('log:cleared', () => $('log-area').replaceChildren());
 
       /* 时钟 */
       NS.SimLoop.onTick(() => { $('sim-clock').textContent = NS.fmtClock(NS.Engine.time); });
@@ -295,10 +279,13 @@
       /* 语言切换 → 面板文本刷新 */
       NS.I18N.onChange(() => {
         NS.I18N.apply();
+        renderRunState();
         $('btn-lang').textContent = NS.I18N.lang === 'zh' ? '中 / EN' : 'EN / 中';
         App.renderTabActions(document.querySelector('.btab.active')?.dataset.tab || 'terminals');
         const ph = document.getElementById('term-empty');
         if (ph) ph.textContent = NS.t('term.empty');
+        $('log-area').replaceChildren();
+        NS.Logger.entries.slice(-1000).forEach(renderLog);
       });
 
       /* 拓扑变化自动保存 */
@@ -320,13 +307,14 @@
       let restored = false;
       try {
         const s = localStorage.getItem('ns.topo');
-        if (s) restored = NS.loadTopology(JSON.parse(s));
+        if (s) restored = NS.loadTopology(JSON.parse(s), { beforeReplace: () => true });
       } catch (e) {}
       if (!restored || NS.world.devices.size === 0) {
         NS.world.clear();
         $('labs-panel').classList.remove('collapsed');   // 首次运行展开实验面板
       }
-      NS.log('网络模拟器就绪 / simulator ready', 'ok');
+      NS.log({ zh: '网络模拟器就绪', en: 'Simulator ready' }, 'ok');
+      NS.SimLoop.start();
     },
   };
   NS.App = App;
