@@ -66,6 +66,11 @@ Telnet 和 HTTP 会立即显示本机路由错误，或在收到路由器的 ICM
 
 ## 快速开始
 
+**在线访问（推荐，国内直连）**：
+👉 **https://network-simulator-shangyin-6gbcyt4s16c1d1ea.webapps.tcloudbase.com**
+
+（部署于腾讯云 CloudBase 静态托管·上海；代码更新后需重新部署，见文末「云端部署（CloudBase）」）
+
 **方式一（免安装）**：直接双击 `index.html`。
 
 **方式二（本地服务器）**：
@@ -131,3 +136,14 @@ python3 tests/browser.py --browser-executable "/Applications/Google Chrome.app/C
 - 演示 ARP：把抓包点设在交换机某链路，观察广播泛洪与单播应答路径差异
 - 排障教学：复制实验 5 拓扑，自行断链 / 改错掩码 / 删路由后让学生排查
 - 丢包实验：链路设 30% 丢包，观察 ping 间歇超时与 TCP 重传（事件日志可见）
+
+## 云端部署（CloudBase）
+
+当前线上地址部署在腾讯云 CloudBase 静态托管（上海地域 `shangyin-6gbcyt4s16c1d1ea`，应用服务名 `network-simulator`，独立子域名）。
+
+更新代码后重新部署（本地目录直传，跳过安装与构建）：
+
+- MCP：`manageApps(action="deployApp", serviceName="network-simulator", framework="static", installCmd="", buildCmd="", buildPath=".", ignore=["**/.git/**", ".zcode/**", "tests/**"])`
+- 或使用 `tcb` CLI：`tcb hosting deploy -e shangyin-6gbcyt4s16c1d1ea`
+
+部署后约 1~2 分钟 CDN 生效；验证时可加随机查询串（如 `?v=时间戳`）绕过缓存。
