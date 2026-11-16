@@ -282,7 +282,7 @@
 
     renderList() {
       const box = document.getElementById('labs-list');
-      box.innerHTML = '';
+      box.replaceChildren();
       LABS.forEach(lab => {
         const item = document.createElement('div');
         item.className = 'lab-item';

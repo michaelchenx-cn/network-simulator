@@ -67,7 +67,7 @@
 
     render() {
       const b = body();
-      b.innerHTML = '';
+      b.replaceChildren();
       if (this._liveTimer) { clearInterval(this._liveTimer); this._liveTimer = null; }
       if (this._liveUnsub) { this._liveUnsub(); this._liveUnsub = null; }
       const sel = this._sel;

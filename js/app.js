@@ -40,7 +40,7 @@
 
     renderTabActions(name) {
       const box = $('tab-actions');
-      box.innerHTML = '';
+      box.replaceChildren();
       if (name === 'terminals') {
         const b = document.createElement('button');
         b.textContent = NS.t('bt.closeAll');
@@ -178,7 +178,10 @@
         $('modal-help').showModal();
       });
       document.querySelector('#modal-help .modal-close').addEventListener('click', () => $('modal-help').close());
-      $('modal-help').addEventListener('click', (e) => { if (e.target === $('modal-help')) $('modal-help').close(); });
+      /* 点击遮罩关闭：closedby="any" 已声明式支持；旧浏览器保留兜底监听 */
+      if (!('closedBy' in HTMLDialogElement.prototype)) {
+        $('modal-help').addEventListener('click', (e) => { if (e.target === $('modal-help')) $('modal-help').close(); });
+      }
 
       /* 仿真状态按钮 */
       const runButton = $('btn-run');

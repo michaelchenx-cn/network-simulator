@@ -21,6 +21,8 @@
     'tb.step':              { zh: '单步（推进到下一个事件）', en: 'Single step (advance one event)' },
     'tb.speed':             { zh: '仿真倍速', en: 'Simulation speed' },
     'tb.zoomReset':         { zh: '重置视图', en: 'Reset view' },
+    'tb.zoomIn':            { zh: '放大', en: 'Zoom in' },
+    'tb.zoomOut':           { zh: '缩小', en: 'Zoom out' },
     'tb.export':            { zh: '导出拓扑', en: 'Export' },
     'tb.import':            { zh: '导入拓扑', en: 'Import' },
     'tb.restore':           { zh: '恢复上一拓扑', en: 'Restore previous topology' },
@@ -187,6 +189,10 @@
       });
       (rootEl || document).querySelectorAll('[data-i18n-title]').forEach(el => {
         el.title = I18N.t(el.getAttribute('data-i18n-title'));
+        /* 纯图标按钮（内部无 data-i18n 可见文本）：title 同步为 aria-label，保证读屏可读 */
+        if (el.tagName === 'BUTTON' && !el.querySelector('[data-i18n]') && !el.hasAttribute('aria-label')) {
+          el.setAttribute('aria-label', el.title);
+        }
       });
     },
   };

@@ -72,7 +72,7 @@
 
       NS.Bus.on('world:changed', () => this.redraw());
       NS.Bus.on('world:cleared', () => {
-        this.flights.clear(); gPkts().innerHTML = '';
+        this.flights.clear(); gPkts().replaceChildren();
         this.linkFrom = null; this._drag = null; this._lastDevClick = null;
         this.select(null);
       });
@@ -261,7 +261,7 @@
       if (!document.getElementById('g-world')) return;
       this.redrawLinksOnly();
       const gd = gDevs();
-      gd.innerHTML = '';
+      gd.replaceChildren();
       for (const d of NS.world.devices.values()) {
         const node = this.drawDevice(d);
         if (this._drag?.dev === d) {
@@ -274,7 +274,7 @@
 
     redrawLinksOnly() {
       const gl = gLinks();
-      gl.innerHTML = '';
+      gl.replaceChildren();
       for (const link of NS.world.links.values()) {
         const [e1, e2] = link.endpoints();
         if (!e1.dev || !e2.dev) continue;

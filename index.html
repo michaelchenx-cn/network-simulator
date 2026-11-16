@@ -93,8 +93,8 @@
     </svg>
     <div id="canvas-hint" data-i18n="canvas.hint">从上方工具栏选择设备，单击画布放置；双击设备打开终端；按住空白处拖动平移，滚轮缩放</div>
     <div id="canvas-zoom">
-      <button id="zoom-in">＋</button>
-      <button id="zoom-out">－</button>
+      <button id="zoom-in" data-i18n-title="tb.zoomIn">＋</button>
+      <button id="zoom-out" data-i18n-title="tb.zoomOut">－</button>
       <button id="zoom-reset" data-i18n-title="tb.zoomReset">⌂</button>
     </div>
   </div>
@@ -137,8 +137,8 @@
   </div>
 </div>
 
-<!-- 弹层：帮助 -->
-<dialog id="modal-help" class="modal" aria-labelledby="help-title">
+<!-- 弹层：帮助（closedby=any：Esc 与点击外部均可关闭，见 modern-web-guidance dialog 指南） -->
+<dialog id="modal-help" class="modal" aria-labelledby="help-title" closedby="any">
   <div class="modal-box">
     <div class="modal-head"><span id="help-title" data-i18n="help.title">使用帮助</span><button class="modal-close" data-i18n-title="ui.close" autofocus>✕</button></div>
     <div id="help-body" class="modal-body"></div>

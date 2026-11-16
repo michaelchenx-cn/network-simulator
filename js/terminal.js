@@ -33,6 +33,9 @@
       this.tab = document.createElement('button');
       this.tab.className = 'ttab';
       this.tab.innerHTML = `<span class="tname"></span><span class="tclose">✕</span>`;
+      const closeMark = this.tab.querySelector('.tclose');
+      closeMark.title = NS.t('ui.closeTerm');
+      closeMark.setAttribute('aria-label', NS.t('ui.closeTerm'));
       this.tab.addEventListener('click', (e) => {
         if (e.target.classList.contains('tclose')) { NS.Terminals.close(this.dev.id); return; }
         NS.Terminals.activate(this.dev.id);
@@ -71,7 +74,7 @@
       this.out.scrollTop = this.out.scrollHeight;
     }
 
-    clear() { this.out.innerHTML = ''; }
+    clear() { this.out.replaceChildren(); }
 
     focus() { this.input.focus(); }
 
@@ -229,6 +232,7 @@
   NS.I18N.register({
     'term.empty': { zh: '双击画布中的设备打开命令行终端', en: 'Double-click a device on the canvas to open its terminal' },
     'term.busy': { zh: '当前命令正在运行。按 Ctrl+C 中断。', en: 'A command is running. Press Ctrl+C to interrupt it.' },
-    'term.powerOff': { zh: '设备已关机，当前命令已中断。', en: 'Device powered off. The current command was interrupted.' },
+    'term.powerOff': { zh: '设备已关机，当前命令已中断。', en: 'Device powered off. The command was interrupted.' },
+    'ui.closeTerm': { zh: '关闭此终端', en: 'Close this terminal' },
   });
 })(typeof window !== 'undefined' ? window : globalThis);

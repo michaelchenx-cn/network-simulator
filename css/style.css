@@ -602,3 +602,11 @@ html.light .link-line.selected { filter: none; }
 html.light .ttab.active { box-shadow: 0 -1px 0 var(--accent) inset, 0 2px 6px rgba(15, 23, 42, .12); }
 html.light .modal-box { box-shadow: 0 24px 80px rgba(15, 23, 42, .25); }
 html.light .toast { box-shadow: 0 8px 28px rgba(15, 23, 42, .18); }
+
+/* ═══════════════ 无障碍：尊重系统"减弱动态效果"偏好 ═══════════════
+ * 仅降级装饰性动画（toast 滑入、面板滑动、悬停过渡）。
+ * 画布上的报文飞行动画是教学信息本体，不受此影响。 */
+@media (prefers-reduced-motion: reduce) {
+  .toast, #labs-panel, #inspector { animation: none !important; transition: none !important; }
+  button, .ttab, .pal-btn, .mode-btn, input, select { transition: none !important; }
+}

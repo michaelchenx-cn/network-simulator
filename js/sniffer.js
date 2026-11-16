@@ -120,7 +120,7 @@
 
     clear() {
       this.rows = []; this.sel = null; this.nextNo = 1;
-      document.querySelector('#sniffer-table tbody').innerHTML = '';
+      document.querySelector('#sniffer-table tbody').replaceChildren();
       document.getElementById('sn-count').textContent = '0';
       this.renderDetail();
     },
