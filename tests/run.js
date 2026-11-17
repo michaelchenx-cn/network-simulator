@@ -791,6 +791,91 @@ section('T30 终端输出反映实际接口与设备状态');
   assert(run(PC2, 'show interfaces').includes('  down  '), '断链的接口显示 down');
 }
 
+/* ─────────── T10 第二单元两课时实验（手册配套内置实验） ─────────── */
+section('T10 第二单元两课时内置实验');
+{
+  /* 结构完整性：10 个实验、id 唯一、字段齐全、分组正确 */
+  assert(NS.LABS.length === 10, `共 10 个内置实验 (got ${NS.LABS.length})`);
+  const ids = NS.LABS.map(l => l.id);
+  assert(new Set(ids).size === ids.length, '实验 id 唯一');
+  assert(NS.LABS.every(l => typeof l.build === 'function' && Array.isArray(l.checks) && l.checks.length >= 1 &&
+    l.goals && l.goals.zh.length && l.goals.en.length), '每个实验均有 build/checks/双语 goals');
+  const unit2 = NS.LABS.filter(l => l.group === 'unit2');
+  assert(unit2.length === 5 && unit2.every((l, i) => l.id === `unit2-${i + 1}`), 'unit2 分组含 5 个课时实验');
+
+  /* unit2-3：tracert 实验拓扑开箱即通（路由已预配） */
+  {
+    const { PC1, Router1 } = loadLab('unit2-3');
+    const res = pingResult(PC1, '192.168.2.10');
+    assert(res && res.kind === 'reply', `unit2-3 预配路由 → PC1 可达 PC2 (got ${res && res.kind})`);
+    assert(res && res.ttl === 126, `跨两跳 TTL=126 (got ${res && res.ttl})`);
+    assert((Router1.staticRoutes || []).length === 1, 'Router1 已预配 1 条静态路由');
+    /* 断开中间链路 → 不可达/超时；恢复 → 通（对验收检查的行为验证） */
+    const midLink = [...NS.world.links.values()].find(l => {
+      const [a, b] = l.endpoints();
+      return (a.dev.type === 'router' && b.dev.type === 'router');
+    });
+    midLink.up = false;
+    NS.Proto.arpCacheClearAll?.();
+    const broken = pingResult(PC1, '192.168.2.10');
+    assert(broken && (broken.kind === 'timeout' || broken.kind === 'unreachable'), `断链后不通 (got ${broken && broken.kind})`);
+    midLink.up = true;
+    const fixed = pingResult(PC1, '192.168.2.10');
+    assert(fixed && fixed.kind === 'reply', '恢复链路后重新连通');
+  }
+
+  /* unit2-4：验收检查项在完整会话后通过 */
+  {
+    const { PC1 } = loadLab('unit2-4');
+    const srv = [...NS.world.devices.values()].find(d => d.type === 'server');
+    let closed = false;
+    const conn = NS.Proto.tcp.open(PC1, '192.168.1.20', 23, {
+      onOpen() {}, onData() {}, onErr() {},
+      onClose() { closed = true; },
+    });
+    NS.Engine.advanceUntilIdle(20000);
+    conn.send('hello\r\n');
+    NS.Engine.advanceUntilIdle(20000);
+    conn.close();
+    NS.Engine.advanceUntilIdle(30000);
+    const c1 = NS.LABS.find(l => l.id === 'unit2-4').checks[0];
+    let ok1 = false; c1.run(v => { ok1 = v; });
+    assert(ok1 && srv._tcpHist.established >= 1, 'unit2-4 验收①：ESTABLISHED 历史 ≥1');
+    const c2 = NS.LABS.find(l => l.id === 'unit2-4').checks[1];
+    let ok2 = false; c2.run(v => { ok2 = v; });
+    assert(ok2 && srv._tcpHist.finClosed >= 1 && closed, 'unit2-4 验收②：FIN 完整关闭');
+  }
+
+  /* unit2-5：空画布 + 验收检查（按参考答案搭建后应通过） */
+  {
+    loadLab('unit2-5');
+    assert(NS.world.devices.size === 0, 'unit2-5 构建后为空画布（学生自建）');
+    /* 按参考答案搭一遍 */
+    const sw1 = NS.createDevice('switch', 200, 240);
+    const pc0 = NS.createDevice('pc', 60, 120);
+    const srv = NS.createDevice('server', 60, 380);
+    const pc1 = NS.createDevice('pc', 120, 250);
+    const r1 = NS.createDevice('router', 420, 240);
+    const sw2 = NS.createDevice('switch', 600, 240);
+    const pc2 = NS.createDevice('pc', 760, 240);
+    NS.connectDevices(pc0, sw1); NS.connectDevices(srv, sw1); NS.connectDevices(pc1, sw1);
+    NS.connectDevices(sw1, r1); NS.connectDevices(r1, sw2); NS.connectDevices(pc2, sw2);
+    pc0.setIfConfig('eth0', { ip: '192.168.10.10', mask: '255.255.255.0', gw: '192.168.10.1' });
+    srv.setIfConfig('eth0', { ip: '192.168.10.20', mask: '255.255.255.0', gw: '192.168.10.1' });
+    pc1.setIfConfig('eth0', { ip: '192.168.10.11', mask: '255.255.255.0', gw: '192.168.10.1' });
+    r1.setIfConfig('ge0/0', { ip: '192.168.10.1', mask: '255.255.255.0' });
+    r1.setIfConfig('ge0/1', { ip: '192.168.20.1', mask: '255.255.255.0' });
+    pc2.setIfConfig('eth0', { ip: '192.168.20.10', mask: '255.255.255.0', gw: '192.168.20.1' });
+    const checks = NS.LABS.find(l => l.id === 'unit2-5').checks;
+    let okA = false; checks[0].run(v => { okA = v; });
+    assert(okA, 'unit2-5 验收①：拓扑规模判定通过');
+    let okB = false;
+    checks[1].run(v => { okB = v; });          /* 异步 ping 验收 */
+    NS.Engine.advanceUntilIdle(30000);
+    assert(okB, 'unit2-5 验收②：跨网段 PC → 服务器连通（参考答案有效）');
+  }
+}
+
 assert(runtimeErrors.length === 0, '协议事件和命令执行无被捕获的运行时异常');
 
 /* ─────────── 输出 ─────────── */

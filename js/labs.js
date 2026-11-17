@@ -23,6 +23,229 @@
   }
 
   const LABS = [
+    /* ════════ 第二单元 · 两课时实验（配套《第二单元实验手册》）════════ */
+    {
+      id: 'unit2-1',
+      group: 'unit2',
+      title: { zh: '课时 1 · 实验一　查看与配置 IP 地址', en: 'Period 1 · Lab 1: Inspect & configure IP' },
+      desc: { zh: '（手册课时 1）双击设备开终端，用 ipconfig 观察未配置状态，再在属性面板配置同网段地址；测试非法地址。',
+              en: '(Manual P1) Inspect with ipconfig, configure same-subnet addresses, test an invalid address.' },
+      goals: {
+        zh: [
+          '双击 <code>PC1</code> 打开终端，执行 <code>ipconfig</code>，记录"未配置"时的显示',
+          '单击 PC1，在右侧属性面板配置 <code>192.168.1.10 / 255.255.255.0</code>；为 <code>PC2</code> 配置 <code>192.168.1.20</code>，再次 <code>ipconfig</code> 对比',
+          '把 PC1 的 IP 改成 <code>192.168.1.260</code>，观察系统提示（地址不合法），再改回 <code>192.168.1.10</code>',
+          '执行 <code>ipconfig /all</code>，找到并记录 PC1 网卡的<b>物理地址（MAC）</b>',
+          '完成记录单后点击【验证】（本实验的 ping 测试在下一个实验进行）',
+        ],
+        en: [
+          'Double-click <code>PC1</code>, run <code>ipconfig</code> and note the "not configured" state',
+          'Configure <code>PC1</code> with <code>192.168.1.10/255.255.255.0</code> and <code>PC2</code> with <code>192.168.1.20</code>, then compare <code>ipconfig</code> again',
+          'Try setting PC1 to <code>192.168.1.260</code> and observe the invalid-address warning; restore <code>192.168.1.10</code>',
+          'Run <code>ipconfig /all</code> and record PC1\'s <b>MAC address</b>',
+          'Fill in your worksheet, then press Verify (the ping test is the next lab)',
+        ],
+      },
+      build() {
+        const sw = NS.createDevice('switch', 400, 240);
+        const pc1 = NS.createDevice('pc', 160, 150);
+        const pc2 = NS.createDevice('pc', 160, 330);
+        NS.connectDevices(pc1, sw); NS.connectDevices(pc2, sw);
+      },
+      checks: [
+        { label: { zh: '两台 PC 已配置同网段合法 IP', en: 'Both PCs configured with valid same-subnet IPs' },
+          run(done) { done(Boolean(sameSubnetPCs())); } },
+      ],
+    },
+
+    {
+      id: 'unit2-2',
+      group: 'unit2',
+      title: { zh: '课时 1 · 实验二　ping 连通测试与 ARP', en: 'Period 1 · Lab 2: ping & ARP' },
+      desc: { zh: '（手册课时 1）ping 检测连通；观察"ping 之前先 ARP"——黄色广播包先行，抓包逐层解码，arp -a 对照。',
+              en: '(Manual P1) Test connectivity with ping; watch ARP-before-ping via the sniffer and arp -a.' },
+      goals: {
+        zh: [
+          '点击底部【抓包】页签，确认捕获点为<b>所有链路</b>',
+          '在 PC1 执行 <code>ping 192.168.1.20</code>：观察终端回复（字节/时间/TTL）与画布上先飞过的<b>黄色 ARP 广播</b>',
+          '在抓包列表点击<b>第一条 ARP 报文</b>，右侧逐层解码中找到"目标 MAC: FF:FF:FF:FF:FF:FF（广播）"',
+          '在 PC1 执行 <code>arp -a</code>，记录 192.168.1.20 对应的物理地址，与实验一记录的 PC2 MAC 对照',
+          '在 PC2 上执行 <code>ping 192.168.1.10</code>（反向测试），然后点击【验证】',
+        ],
+        en: [
+          'Open the Sniffer tab with capture point = all links',
+          'From PC1 run <code>ping 192.168.1.20</code>: watch the reply line and the <b>yellow ARP broadcast</b> flying first',
+          'Click the first ARP frame and find "Destination MAC: FF:FF:FF:FF:FF:FF (Broadcast)" in the decode view',
+          'Run <code>arp -a</code> on PC1; compare the MAC for 192.168.1.20 with PC2\'s MAC from Lab 1',
+          'Run <code>ping 192.168.1.10</code> on PC2 (reverse test), then press Verify',
+        ],
+      },
+      build() {
+        const sw = NS.createDevice('switch', 400, 240);
+        const pc1 = NS.createDevice('pc', 160, 150);
+        const pc2 = NS.createDevice('pc', 160, 330);
+        NS.connectDevices(pc1, sw); NS.connectDevices(pc2, sw);
+        cfg(pc1, 'eth0', '192.168.1.10', '255.255.255.0');
+        cfg(pc2, 'eth0', '192.168.1.20', '255.255.255.0');
+      },
+      checks: [
+        { label: { zh: 'PC1 的 ARP 缓存已学到 PC2', en: 'PC1 ARP cache learned PC2' },
+          run(done) {
+            const pc1 = [...NS.world.devices.values()].find(d => d.name === 'PC1');
+            const cache = pc1 && pc1.arpCaches && pc1.arpCaches.get('eth0');
+            done(Boolean(cache && cache.has('192.168.1.20')));
+          } },
+        { label: { zh: 'PC1 → PC2 ping 连通', en: 'PC1 → PC2 ping succeeds' },
+          run(done) {
+            const st = sameSubnetPCs();
+            if (!st) return done(false);
+            pingCheck(st.a, st.b.interfaces[0].ip, done);
+          } },
+      ],
+    },
+
+    {
+      id: 'unit2-3',
+      group: 'unit2',
+      title: { zh: '课时 1 · 实验三　默认网关与 tracert 路径追踪', en: 'Period 1 · Lab 3: default gateway & tracert' },
+      desc: { zh: '（手册课时 1）ipconfig 找默认网关，tracert 数跳数；断开中间链路观察超时，再恢复。',
+              en: '(Manual P1) Find the default gateway, count hops with tracert; break the middle link and watch timeouts.' },
+      answer: {
+        zh: '断开 R1—R2 后：tracert 第 1 跳（192.168.1.1）仍正常应答，从第 2 跳起显示"请求超时"。恢复方法：单击该链路 → 属性面板 → 连通。',
+        en: 'After breaking R1—R2: hop 1 (192.168.1.1) still answers; from hop 2 on you get timeouts. Restore: click the link → inspector → Up.',
+      },
+      goals: {
+        zh: [
+          '双击 <code>PC1</code> 执行 <code>ipconfig</code>，找到<b>默认网关</b>一行——它就是通信经过的第一个路由器',
+          '执行 <code>tracert 192.168.2.10</code>，数出经过的路由器数量（不含本机与目标），注意每行的 3 个时间值',
+          '单击画布上 <b>Router1—Router2 之间的链路</b>，在属性面板点击<b>断开</b>；再次 tracert，观察第 1 跳正常、之后"请求超时"',
+          '把链路<b>恢复连通</b>，在 Router1 终端执行 <code>show ip route</code> 查看路由表，然后点击【验证】',
+        ],
+        en: [
+          'On <code>PC1</code> run <code>ipconfig</code> and locate the <b>default gateway</b> line — the first router on the path',
+          'Run <code>tracert 192.168.2.10</code>; count the routers on the way and the 3 time columns per line',
+          'Click the <b>Router1—Router2 link</b>, set it <b>down</b> in the inspector; tracert again — hop 1 answers, then timeouts',
+          'Restore the link, run <code>show ip route</code> on Router1, then press Verify',
+        ],
+      },
+      build() {
+        const pc1 = NS.createDevice('pc', 90, 240);
+        const r1 = NS.createDevice('router', 300, 240);
+        const r2 = NS.createDevice('router', 520, 240);
+        const pc2 = NS.createDevice('pc', 730, 240);
+        NS.connectDevices(pc1, r1); NS.connectDevices(r1, r2); NS.connectDevices(r2, pc2);
+        cfg(pc1, 'eth0', '192.168.1.10', '255.255.255.0', '192.168.1.1');
+        cfg(r1, 'ge0/0', '192.168.1.1', '255.255.255.0');
+        cfg(r1, 'ge0/1', '10.0.0.1', '255.255.255.252');
+        cfg(r2, 'ge0/0', '10.0.0.2', '255.255.255.252');
+        cfg(r2, 'ge0/1', '192.168.2.1', '255.255.255.0');
+        cfg(pc2, 'eth0', '192.168.2.10', '255.255.255.0', '192.168.2.1');
+        r1.addRoute('192.168.2.0', '255.255.255.0', '10.0.0.2');   /* 路由已配好，tracert 开箱即用 */
+        r2.addRoute('192.168.1.0', '255.255.255.0', '10.0.0.1');
+      },
+      checks: [
+        { label: { zh: '链路已恢复且 PC1 → 192.168.2.10 路径连通', en: 'Link restored; PC1 → 192.168.2.10 reachable' },
+          run(done) {
+            const pc1 = [...NS.world.devices.values()].find(d => d.name === 'PC1');
+            if (!pc1) return done(false);
+            pingCheck(pc1, '192.168.2.10', done);
+          } },
+      ],
+    },
+
+    {
+      id: 'unit2-4',
+      group: 'unit2',
+      title: { zh: '课时 2 · 实验四　netstat 与 TCP 三次握手', en: 'Period 2 · Lab 4: netstat & TCP handshake' },
+      desc: { zh: '（手册课时 2）telnet 建立连接，从服务器侧 netstat 看 ESTABLISHED；抓包逐层解码三次握手；单步慢放重演。',
+              en: '(Manual P2) Establish a session, watch ESTABLISHED via netstat on the server; decode the handshake in the sniffer.' },
+      goals: {
+        zh: [
+          'PC1 执行 <code>netstat -an</code>：此时没有任何 PC1 的连接',
+          '执行 <code>telnet 192.168.1.20</code>，随意发一句话（注意：会话期间终端输入都发给服务器，不能再执行命令）',
+          '<b>双击 Server1</b>，在服务器终端执行 <code>netstat -an</code>：记录 ESTABLISHED 行的本地/外部地址与端口',
+          '打开【抓包】面板，依次点击前三条 TCP 报文，展开 Ethernet II → IP → TCP 三层，记录 SYN / SYN·ACK / ACK',
+          '进阶：⏸ 暂停后重新 telnet，连按 ⏭ 单步逐帧重演握手；输入 <code>quit</code> 后立即在 PC1 执行 <code>netstat -an</code> 看 <b>TIME_WAIT</b>',
+        ],
+        en: [
+          'On PC1 run <code>netstat -an</code>: no connections yet',
+          'Run <code>telnet 192.168.1.20</code> and send a line (during the session the terminal input goes to the server)',
+          '<b>Double-click Server1</b> and run <code>netstat -an</code> there: record the ESTABLISHED local/foreign addresses',
+          'In the Sniffer, click the first three TCP frames and expand Ethernet II → IP → TCP; record SYN / SYN·ACK / ACK',
+          'Advanced: pause (⏸), redo telnet and step (⏭) through the handshake; after <code>quit</code>, run <code>netstat -an</code> on PC1 to see <b>TIME_WAIT</b>',
+        ],
+      },
+      build() {
+        const sw = NS.createDevice('switch', 400, 240);
+        const pc1 = NS.createDevice('pc', 140, 150);
+        const srv = NS.createDevice('server', 140, 340);
+        NS.connectDevices(pc1, sw); NS.connectDevices(srv, sw);
+        cfg(pc1, 'eth0', '192.168.1.10', '255.255.255.0');
+        cfg(srv, 'eth0', '192.168.1.20', '255.255.255.0');
+      },
+      checks: [
+        { label: { zh: '服务器出现过 ESTABLISHED 连接', en: 'An ESTABLISHED connection appeared on the server' },
+          run(done) {
+            const srv = [...NS.world.devices.values()].find(d => d.type === 'server');
+            done(!!(srv && srv._tcpHist && srv._tcpHist.established >= 1));
+          } },
+        { label: { zh: '会话已通过 quit 完整关闭（挥手完成）', en: 'Session closed cleanly via quit (FIN close)' },
+          run(done) {
+            const srv = [...NS.world.devices.values()].find(d => d.type === 'server');
+            done(!!(srv && srv._tcpHist && srv._tcpHist.finClosed >= 1));
+          } },
+      ],
+    },
+
+    {
+      id: 'unit2-5',
+      group: 'unit2',
+      title: { zh: '课时 2 · 实验五　综合组网：校园直播网络', en: 'Period 2 · Lab 5: build a campus live-streaming network' },
+      desc: { zh: '（手册课时 2）按需求从零搭建双房间直播网络：选设备、连线、规划地址、配置参数，用 ping/http 验收。',
+              en: '(Manual P2) Build the two-room streaming network from scratch: devices, links, addressing, verify with ping/http.' },
+      answer: {
+        zh: '参考方案：A 房 PC0（192.168.10.10/24）+ Server1（192.168.10.20/24，静态）+ PC1（192.168.10.11/24）— Switch1 — Router1（ge0/0: 192.168.10.1，ge0/1: 192.168.20.1）— Switch2 — PC2（192.168.20.10/24，网关 192.168.20.1）。A 房设备网关指向 192.168.10.1。',
+        en: 'Reference: Room A PC0 (192.168.10.10/24), Server1 (192.168.10.20/24 static), PC1 (192.168.10.11/24) — Switch1 — Router1 (ge0/0: 192.168.10.1, ge0/1: 192.168.20.1) — Switch2 — PC2 (192.168.20.10/24, gw 192.168.20.1). Room A hosts use gateway 192.168.10.1.',
+      },
+      goals: {
+        zh: [
+          '<b>需求</b>：A 房间有推流机 PC0 和直播服务器 Server1；B 房间有两台观看 PC（其中一台命名 PC2）。两房间为独立网段，经一台路由器互联',
+          '地址规划：A 网段用 <code>192.168.10.0/24</code>，B 网段用 <code>192.168.20.0/24</code>（自拟每台设备地址并填入记录单）',
+          '放置设备并连线；为所有设备配置 IP/掩码；路由器两个接口分别作两网段网关；PC 配置默认网关；服务器用<b>静态</b>地址',
+          '验收：PC2 <code>ping</code> 服务器 → 通；PC2 <code>tracert</code> 服务器 → 记录跳数；Server1 <code>netstat -an</code> → 80 端口 LISTENING；PC0 <code>http 服务器IP</code> → HTTP/1.1 200 OK',
+          '拓展：与同伴互相制造一处故障（断链/改错掩码或网关），用 ping、ipconfig、tracert 定位修复后，点击【验证】',
+        ],
+        en: [
+          '<b>Requirement</b>: Room A has streamer PC0 and Server1; Room B has two viewer PCs (name one PC2). Two subnets joined by one router',
+          'Addressing: room A <code>192.168.10.0/24</code>, room B <code>192.168.20.0/24</code> (assign each host an address and fill in your worksheet)',
+          'Place & link devices; configure IP/mask on everything; the router serves as both gateways; servers use <b>static</b> addresses',
+          'Acceptance: PC2 <code>ping</code> server (ok), <code>tracert</code> (record hops), Server1 <code>netstat -an</code> (80 LISTENING), PC0 <code>http server</code> (200 OK)',
+          'Extension: swap a hidden fault with a partner (broken link / wrong mask or gateway), locate it with ping / ipconfig / tracert, then press Verify',
+        ],
+      },
+      build() { /* 学生从零搭建，本实验不预置拓扑 */ },
+      checks: [
+        { label: { zh: '拓扑规模满足需求（≥5 台设备，含服务器/路由器/≥2 台 PC）', en: 'Topology meets the requirement (≥5 devices incl. server, router, ≥2 PCs)' },
+          run(done) {
+            const ds = [...NS.world.devices.values()];
+            const has = (t) => ds.filter(d => d.type === t).length;
+            done(ds.length >= 5 && has('server') >= 1 && has('router') >= 1 && has('pc') >= 2);
+          } },
+        { label: { zh: '跨网段直播链路打通（不同网段的 PC 能 ping 通服务器）', en: 'Cross-subnet streaming path works (a PC in another subnet reaches the server)' },
+          run(done) {
+            const srv = [...NS.world.devices.values()].find(d => d.type === 'server' && d.interfaces[0].ip);
+            if (!srv) return done(false);
+            const IP = NS.IP;
+            const pc = [...NS.world.devices.values()].find(d =>
+              d.type === 'pc' && d.interfaces[0].ip && d.interfaces[0].mask &&
+              !IP.inSubnet(d.interfaces[0].ip, srv.interfaces[0].ip, d.interfaces[0].mask));
+            if (!pc) return done(false);
+            pingCheck(pc, srv.interfaces[0].ip, done);
+          } },
+      ],
+    },
+
+    /* ════════ 基础练习 ════════ */
     {
       id: 'lab-ip',
       title: { zh: '实验 1 · IP 配置与直连通', en: 'Lab 1 · IP configuration & direct connectivity' },
@@ -283,16 +506,29 @@
     renderList() {
       const box = document.getElementById('labs-list');
       box.replaceChildren();
-      LABS.forEach(lab => {
-        const item = document.createElement('div');
-        item.className = 'lab-item';
-        item.innerHTML = `<h4>${lab.title[NS.I18N.lang === 'zh' ? 'zh' : 'en']}</h4><p>${lab.desc[NS.I18N.lang === 'zh' ? 'zh' : 'en']}</p>`;
-        const b = document.createElement('button');
-        b.className = 'lab-load';
-        b.textContent = NS.I18N.lang === 'zh' ? '加载实验' : 'Load lab';
-        b.addEventListener('click', () => this.load(lab.id));
-        item.appendChild(b);
-        box.appendChild(item);
+      const GROUPS = {
+        unit2: { zh: '📗 第二单元 · 两课时实验（配套实验手册）', en: '📗 Unit 2 · Two-period labs (from the lab manual)' },
+        basic: { zh: '📘 基础练习', en: '📘 Basic practice' },
+      };
+      const zh = NS.I18N.lang === 'zh';
+      Object.keys(GROUPS).forEach(g => {
+        const labs = LABS.filter(l => (l.group || 'basic') === g);
+        if (!labs.length) return;
+        const h = document.createElement('div');
+        h.className = 'lab-group-title';
+        h.textContent = zh ? GROUPS[g].zh : GROUPS[g].en;
+        box.appendChild(h);
+        labs.forEach(lab => {
+          const item = document.createElement('div');
+          item.className = 'lab-item';
+          item.innerHTML = `<h4>${lab.title[zh ? 'zh' : 'en']}</h4><p>${lab.desc[zh ? 'zh' : 'en']}</p>`;
+          const b = document.createElement('button');
+          b.className = 'lab-load';
+          b.textContent = zh ? '加载实验' : 'Load lab';
+          b.addEventListener('click', () => this.load(lab.id));
+          item.appendChild(b);
+          box.appendChild(item);
+        });
       });
     },
 
