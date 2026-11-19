@@ -13,6 +13,7 @@
   const NS = root.NS = root.NS || {};
   const Engine = NS.Engine, Bus = NS.Bus;
   const echoResponders = new WeakMap();
+  const switchRecipients = new WeakMap();
 
   /* ══════════ IP 工具 ══════════ */
   const IP = {
@@ -165,6 +166,7 @@
     TCP_RTO: 1000,          // 重传超时
     TCP_SYN_RETRY: 2,       // SYN 额外重传次数
     TCP_DATA_RETRY: 2,
+    TCP_FIN_WAIT_2_TIMEOUT: 30000, // 本端 FIN 已获确认后等待对端 FIN 的仿真毫秒数
     MSL: 3000,              // TIME_WAIT = 2*MSL = 6s 仿真时间
 
     /* ───── ARP 缓存 ───── */
@@ -480,6 +482,7 @@
 
       _drop(conn) {
         this._clearRt(conn);
+        Engine.cancel(conn._finWait2Timer);
         Engine.cancel(conn._timeWaitTimer);
         const arr = this.connsOf(conn.dev);
         const i = arr.indexOf(conn); if (i >= 0) arr.splice(i, 1);
@@ -636,6 +639,11 @@
 
         if (conn.state === 'FIN_WAIT_1' && seg.ack === conn.seq) {
           conn.state = 'FIN_WAIT_2';
+          conn._finWait2Timer = Engine.schedule(Proto.TCP_FIN_WAIT_2_TIMEOUT, () => {
+            NS.log({ zh: `${dev.name}: 等待对端 FIN 超时，关闭连接`, en: `${dev.name}: Timed out waiting for the peer’s FIN. Connection closed` }, 'warn');
+            this._drop(conn);
+            Bus.emit('device:changed', dev.id);
+          }, 'tcp-fin-wait-2');
           this._notifyClosed(conn);
         } else if (conn.state === 'CLOSING' && seg.ack === conn.seq) {
           conn.state = 'TIME_WAIT'; this._mslTimer(conn);
@@ -675,6 +683,7 @@
       _passiveAckFin(dev, conn, seg) {              // FIN_WAIT_2 收到 FIN → ACK + TIME_WAIT
         conn.ack = seg.seq + seg.dataLen + 1;
         this._send(dev, conn, Frames.tcp(conn.localPort, conn.remotePort, { ACK: 1 }, conn.seq, conn.ack), 0);
+        Engine.cancel(conn._finWait2Timer);
         conn.state = 'TIME_WAIT'; this._mslTimer(conn);
         NS.log({ zh: `${dev.name}: 四次挥手完成，进入 TIME_WAIT`, en: `${dev.name}: Four-way close complete. Entering TIME_WAIT` }, 'ok');
       },
@@ -798,6 +807,11 @@
     attachSwitchStack(dev) {
       dev.receiveFrame = (frame, port) => {          // port: 接口对象（端口名）
         if (!dev.on || !port) return;
+        // 同一以太帧在二层转发时复用对象，每台交换机只处理一次，避免环路持续泛洪。
+        let recipients = switchRecipients.get(frame);
+        if (!recipients) switchRecipients.set(frame, recipients = new WeakSet());
+        if (recipients.has(dev)) return;
+        recipients.add(dev);
         const src = frame.eth.src;
         if (!IP.isBroadcast(src)) {                  // 学习源 MAC
           learnAddress(dev, dev.macTable, src, { port: port.name }, this.MAC_AGE);

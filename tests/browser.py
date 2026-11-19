@@ -32,6 +32,9 @@ def main():
         page.locator('.term-win.active input').fill(line)
         page.locator('.term-win.active input').press('Enter')
 
+    def load_lab(page, lab_id):
+        page.locator(f'.lab-load[data-lab-id="{lab_id}"]').click()
+
     with sync_playwright() as p:
         options = {'headless': True}
         if args.browser_executable:
@@ -67,7 +70,7 @@ def main():
             page.locator('#btn-step').click()
             check(page.evaluate('!NS.Engine.running') and run_button.text_content() == '▶', '单步时同步显示暂停后的按钮状态')
             run_button.click()
-            page.locator('.lab-load').nth(2).click()
+            load_lab(page, 'lab-arp')
             page.locator('.dev-node').filter(has_text='PC1').dblclick()
             command(page, 'ping -n 1 192.168.1.20')
             page.wait_for_function("document.querySelector('.term-output').textContent.includes('统计信息')")
@@ -193,7 +196,7 @@ def main():
             accept_dialog = False
             with page.expect_event('dialog'):
                 import_file(page, fixture)
-            page.locator('.lab-load').nth(1).click()
+            load_lab(page, 'lab-route')
             check(page.evaluate('NS.Labs.active?.id') == 'lab-arp' and page.locator('.dev-node[data-id="review-router"]').count() == 0 and
                   '终端会关闭' in dialog_messages[-2] and '加载实验' in dialog_messages[-1], '取消导入或加载实验会保留当前拓扑')
             accept_dialog = True
@@ -227,7 +230,7 @@ def main():
             page.get_by_placeholder('192.168.1.10', exact=True).press('Tab')
             check(page.locator('#toast-container img').count() == 0 and not page.evaluate('Boolean(window.__injected)'), '设备名称提示不会执行注入脚本')
 
-            page.locator('.lab-load').nth(1).click()
+            load_lab(page, 'lab-route')
             page.locator('.dev-node').filter(has_text='PC1').dblclick()
             command(page, 'http 192.168.2.99')
             page.wait_for_function("document.querySelector('.term-output').textContent.includes('报告目标网络不可达')", timeout=4000)
@@ -250,7 +253,7 @@ def main():
             page.wait_for_function("document.querySelectorAll('#lab-checks .lab-check').length === 2")
             old_pc = page.evaluate_handle("[...NS.world.devices.values()].find(d => d.name === 'PC1')")
             assert old_pc.evaluate('dev => dev.icmpCbs.size') == 1, '切换实验前应有一条待完成的验证探测'
-            page.locator('.lab-load').nth(3).click()
+            load_lab(page, 'lab-tcp')
             check(old_pc.evaluate('dev => dev.icmpCbs.size') == 0 and verify.is_enabled() and
                   page.locator('#lab-checks .lab-check').count() == 0, '切换实验取消旧探测并释放验证按钮')
             old_pc.dispose()
@@ -311,17 +314,56 @@ def main():
             page.set_viewport_size({'width': 1024, 'height': 820})
             if page.evaluate("document.getElementById('labs-panel').classList.contains('collapsed')"):
                 page.locator('#btn-labs').click()
-            page.locator('.lab-load').first.click()
+            load_lab(page, 'lab-ip')
             check(page.evaluate("document.getElementById('labs-panel').classList.contains('collapsed')") and
                   not page.locator('#inspector').is_visible(), '窄屏加载实验后收起侧栏，露出画布')
             saved_backup = page.evaluate("localStorage.getItem('ns.topo.backup')")
             page.locator('#btn-labs').click()
-            page.locator('.lab-load').nth(1).click()
+            load_lab(page, 'lab-route')
             check(saved_backup and page.evaluate("localStorage.getItem('ns.topo.backup')") == saved_backup and
                   '已有拓扑备份将保留' in dialog_messages[-1], '连续切换未修改的实验时保留自建拓扑备份')
+
+            page.wait_for_function("JSON.parse(localStorage.getItem('ns.topo')).devices.some(d => d.name === 'Router1')")
+            page.reload()
+            page.locator('#btn-labs').click()
+            load_lab(page, 'lab-ip')
+            check(page.evaluate("localStorage.getItem('ns.topo.backup')") == saved_backup and
+                  '已有拓扑备份将保留' in dialog_messages[-1], '刷新后切换未修改的实验仍保留自建拓扑备份')
+
+            page.evaluate("[...NS.world.devices.values()].find(d => d.name === 'PC1').setIfConfig('eth0', {ip: '192.168.1.99'})")
+            page.wait_for_function("JSON.parse(localStorage.getItem('ns.topo')).devices.some(d => d.ifaces[0].ip === '192.168.1.99')")
+            page.reload()
+            page.locator('#btn-labs').click()
+            load_lab(page, 'lab-route')
+            check(page.evaluate("JSON.parse(localStorage.getItem('ns.topo.backup')).devices.some(d => d.ifaces[0].ip === '192.168.1.99')") and
+                  '当前拓扑将覆盖已有备份' in dialog_messages[-1], '刷新后仍可将改过的实验保存为备份')
             check(not errors, f'浏览器无脚本错误 {errors}')
-            print(f'\n浏览器回归通过 {checks} 项', flush=True)
             context.close()
+
+            with browser.new_context() as tabs:
+                older = tabs.new_page()
+                editor = tabs.new_page()
+                url = (ROOT / 'index.html').as_uri()
+                older.goto(url)
+                editor.goto(url)
+                editor.evaluate("NS.createDevice('router', 100, 100)")
+                editor.wait_for_function("JSON.parse(localStorage.getItem('ns.topo'))?.devices.length === 1")
+                older.reload()
+                check(older.evaluate("[...NS.world.devices.values()][0]?.name") == 'Router1',
+                      '刷新未改动的旧标签页会读到另一页保存的拓扑')
+
+                editor.evaluate("NS.createDevice('server', 220, 100)")
+                editor.reload()
+                check(editor.evaluate("[...NS.world.devices.values()].map(d => d.name)") == ['Router1', 'Server1'],
+                      '自动保存延迟期间刷新会写入同一标签页的最新改动')
+
+                older.evaluate("NS.createDevice('pc', 340, 100)")
+                older.get_by_text('另一标签页已更新拓扑存档', exact=False).wait_for()
+                check(older.evaluate("JSON.parse(localStorage.getItem('ns.topo')).devices.map(d => d.name)") ==
+                      ['Router1', 'Server1'] and older.evaluate("[...NS.world.devices.values()].some(d => d.name === 'PC1')"),
+                      '旧标签页编辑时保留其画布和另一页的最新存档')
+
+            print(f'\n浏览器回归通过 {checks} 项', flush=True)
         finally:
             browser.close()
 
