@@ -326,16 +326,18 @@
       checks: [
         { label: { zh: 'Router1 与 Router2 均已配置去对侧的静态路由', en: 'Both routers have static routes to the far subnet' },
           run(done) {
-            const rs = [...NS.world.devices.values()].filter(d => d.type === 'router');
-            if (rs.length < 2) return done(false);
-            const r1 = rs.find(r => r.name === 'Router1'), r2 = rs.find(r => r.name === 'Router2');
-            done(!!(r1 && r2 && r1.staticRoutes.some(r => r.dest === '192.168.2.0') && r2.staticRoutes.some(r => r.dest === '192.168.1.0')));
+            const routers = [...NS.world.devices.values()].filter(d => d.type === 'router');
+            const hasRoute = (name, dest, nh) => routers.find(r => r.name === name)?.staticRoutes.some(
+              r => r.dest === dest && r.mask === '255.255.255.0' && r.nh === nh);
+            done(Boolean(hasRoute('Router1', '192.168.2.0', '10.0.0.2') &&
+              hasRoute('Router2', '192.168.1.0', '10.0.0.1')));
           } },
         { label: { zh: 'PC1 → 192.168.2.10 ping 连通', en: 'PC1 → 192.168.2.10 ping succeeds' },
           run(done) {
-            const pc1 = [...NS.world.devices.values()].find(d => d.name === 'PC1');
-            if (!pc1) return done(false);
-            return pingCheck(pc1, '192.168.2.10', done);
+            const pcs = [...NS.world.devices.values()].filter(d => d.type === 'pc');
+            const pc1 = pcs.find(d => d.name === 'PC1'), pc2 = pcs.find(d => d.name === 'PC2');
+            if (!pc1?.on || !pc2?.on || pc2.getInterface('eth0')?.ip !== '192.168.2.10') return done(false);
+            return pingCheck(pc1, '192.168.2.10', done, pc2);
           } },
       ],
     },
@@ -474,9 +476,13 @@
       checks: [
         { label: { zh: 'PC1 → 192.168.2.10 ping 连通（两处故障均已修复）', en: 'PC1 → 192.168.2.10 ping succeeds (both faults fixed)' },
           run(done) {
-            const pc1 = [...NS.world.devices.values()].find(d => d.name === 'PC1');
-            if (!pc1) return done(false);
-            return pingCheck(pc1, '192.168.2.10', done);
+            const pcs = [...NS.world.devices.values()].filter(d => d.type === 'pc');
+            const pc1 = pcs.find(d => d.name === 'PC1'), pc2 = pcs.find(d => d.name === 'PC2');
+            if (!pc1?.on || !pc2?.on) return done(false);
+            const target = pc2.getInterface('eth0');
+            if (target?.ip !== '192.168.2.10' || target.mask !== '255.255.255.0' ||
+                !NS.world.links.get(target.linkId)?.up) return done(false);
+            return pingCheck(pc1, target.ip, done, pc2);
           } },
       ],
     },
@@ -524,6 +530,7 @@
           item.innerHTML = `<h4>${lab.title[zh ? 'zh' : 'en']}</h4><p>${lab.desc[zh ? 'zh' : 'en']}</p>`;
           const b = document.createElement('button');
           b.className = 'lab-load';
+          b.dataset.labId = lab.id;
           b.textContent = zh ? '加载实验' : 'Load lab';
           b.addEventListener('click', () => this.load(lab.id));
           item.appendChild(b);

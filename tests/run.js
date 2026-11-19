@@ -274,6 +274,15 @@ function pingResult(dev, ip) {
   return result;
 }
 
+function verifyLab(id) {
+  return NS.LABS.find(lab => lab.id === id).checks.map(check => {
+    let passed;
+    check.run(value => { passed = value; });
+    NS.Engine.advanceUntilIdle(10000);
+    return passed;
+  });
+}
+
 function droppingFrames(shouldDrop, run) {
   const originalTx = NS.Net.tx;
   NS.Net.tx = function (dev, iface, frame) {
@@ -734,13 +743,7 @@ section('批量创建时设备 ID 保持唯一');
 section('T28 实验 1 核验地址和应答设备');
 {
   const { PC1, PC2, Switch1 } = loadLab('lab-ip');
-  const checks = NS.LABS.find(lab => lab.id === 'lab-ip').checks;
-  const verify = () => checks.map(check => {
-    let pass;
-    check.run(value => { pass = value; });
-    NS.Engine.advanceUntilIdle(10000);
-    return pass;
-  });
+  const verify = () => verifyLab('lab-ip');
   cfg(PC1, 'eth0', '192.168.1.10', '');
   cfg(PC2, 'eth0', '10.0.0.20', '255.0.0.0');
   assert(verify().every(pass => pass === false), '缺少掩码时两项验收均失败');
@@ -758,6 +761,81 @@ section('T28 实验 1 核验地址和应答设备');
   PC1.arpCaches.clear();
   link.up = true;
   assert(verify().every(pass => pass === true), '恢复正确拓扑和配置后两项均可通过');
+}
+
+section('基础实验 2 和 5 验收核对配置与实际应答');
+{
+  const { PC1, PC2, Router1, Router2 } = loadLab('lab-route');
+  Router1.addRoute('192.168.2.0', '255.255.0.0', '10.0.0.2');
+  Router2.addRoute('192.168.1.0', '255.255.255.0', '10.0.0.1');
+  assert(verifyLab('lab-route')[0] === false, '实验 2 拒绝错误掩码');
+  Router1.removeRoute(0);
+  Router1.addRoute('192.168.2.0', '255.255.255.0', '10.0.0.25');
+  assert(verifyLab('lab-route')[0] === false, '实验 2 拒绝错误下一跳');
+  Router1.removeRoute(0);
+  Router1.addRoute('192.168.2.0', '255.255.255.0', '10.0.0.2');
+  assert(verifyLab('lab-route').every(Boolean), '实验 2 正确配置后两项均通过');
+  PC1.setIfConfig('eth0', { ip: PC2.interfaces[0].ip });
+  assert(verifyLab('lab-route')[1] === false, '实验 2 不接受本机应答');
+}
+{
+  const { PC1, PC2 } = loadLab('lab-trouble');
+  const link = NS.world.links.get(PC2.interfaces[0].linkId);
+  link.up = true;
+  PC2.addRoute('192.168.1.0', '255.255.255.0', '192.168.2.1');
+  assert(pingResult(PC1, '192.168.2.10')?.kind === 'reply' && verifyLab('lab-trouble')[0] === false,
+    '实验 5 可绕路连通时仍拒绝错误掩码');
+  PC2.removeRoute(0);
+  PC2.setIfConfig('eth0', { mask: '255.255.255.0' });
+  link.up = false;
+  PC1.setIfConfig('eth0', { ip: PC2.interfaces[0].ip });
+  assert(verifyLab('lab-trouble')[0] === false, '实验 5 断链时拒绝本机应答');
+  PC1.setIfConfig('eth0', { ip: '192.168.1.10' });
+  link.up = true;
+  assert(verifyLab('lab-trouble')[0] === true, '实验 5 两处故障均修复后通过');
+}
+
+section('二层环路不会持续泛洪');
+{
+  NS.world.clear();
+  const left = NS.createDevice('switch', 100, 0);
+  const middle = NS.createDevice('switch', 200, 0);
+  const right = NS.createDevice('switch', 300, 0);
+  const pc1 = NS.createDevice('pc', 0, 0);
+  const pc2 = NS.createDevice('pc', 400, 0);
+  NS.connectDevices(left, middle);
+  NS.connectDevices(middle, right);
+  NS.connectDevices(right, left);
+  NS.connectDevices(pc1, left);
+  NS.connectDevices(pc2, right);
+  cfg(pc1, 'eth0', '192.168.1.10', '255.255.255.0');
+  cfg(pc2, 'eth0', '192.168.1.20', '255.255.255.0');
+  let broadcasts = 0, result;
+  const off = NS.Bus.on('frame', ({ frame }) => { if (NS.IP.isBroadcast(frame.eth.dst)) broadcasts++; });
+  NS.Proto.icmpEcho(pc1, '192.168.1.30', {}, value => { result = value; });
+  NS.Engine.advanceUntilIdle(2500);
+  const sent = broadcasts;
+  NS.Engine.advanceUntilIdle(2500);
+  off();
+  assert(result?.kind === 'timeout' && sent > 0 && broadcasts === sent, '探测结束后环路不再转发广播');
+  assert(pingResult(pc1, '192.168.1.20')?.kind === 'reply', '环路限制不妨碍后续正常通信');
+}
+
+section('TCP FIN_WAIT_2 在对端 FIN 未到时过期');
+{
+  const { PC1, Server1 } = loadLab('lab-tcp');
+  const conn = NS.Proto.tcp.open(PC1, '192.168.1.20', 23, {});
+  NS.Engine.advanceUntilIdle(5000);
+  conn.close();
+  while (conn.state === 'FIN_WAIT_1' && NS.Engine.stepEvent()) {}
+  const link = NS.world.links.get(Server1.interfaces[0].linkId);
+  link.up = false;
+  const timeout = NS.Proto.TCP_FIN_WAIT_2_TIMEOUT;
+  NS.Engine.advanceUntilIdle(timeout - 1);
+  assert(conn.state === 'FIN_WAIT_2', '超时前仍保留连接并等待对端 FIN');
+  NS.Engine.advanceUntilIdle(timeout);
+  assert(conn.state === 'CLOSED' && !NS.Proto.tcp.connsOf(PC1).includes(conn) &&
+    NS.Proto.tcp.connsOf(Server1).length === 0, '断链后双方最终清理连接');
 }
 
 section('T29 仿真时间驱动地址表过期');

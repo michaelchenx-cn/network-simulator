@@ -59,7 +59,8 @@
       const shouldBackUp = current && (!backup || !NS.Labs.isPristineTopology(current));
       const messages = [];
       if (current || key === 'toast.confirmRestore') messages.push(NS.t(key));
-      if (current) messages.push(NS.t(shouldBackUp ? 'toast.replaceEffects' : 'toast.replaceKeepBackup'));
+      const backupEffect = backup ? 'toast.replaceBackup' : 'toast.replaceEffects';
+      if (current) messages.push(NS.t(shouldBackUp ? backupEffect : 'toast.replaceKeepBackup'));
       if (conflicts.length) messages.push(conflictMessage(conflicts), NS.t('toast.conflictContinue'));
       if (messages.length && !window.confirm(messages.join('\n\n'))) return false;
       if (shouldBackUp) {
@@ -291,31 +292,55 @@
         NS.Logger.entries.slice(-1000).forEach(renderLog);
       });
 
-      /* 拓扑变化自动保存 */
+      /* 恢复或首次运行 */
+      let restored = false;
+      let savedTopology = null;
+      try {
+        savedTopology = localStorage.getItem('ns.topo');
+        if (savedTopology) {
+          const data = JSON.parse(savedTopology);
+          restored = NS.loadTopology(data, { beforeReplace: () => true });
+          if (restored && typeof data.labBuiltSnapshot === 'string') {
+            NS.Labs.builtSnapshot = data.labBuiltSnapshot;
+          }
+        }
+      } catch (e) {}
+      if (!restored || NS.world.devices.size === 0) {
+        if (!restored) NS.world.clear();
+        $('labs-panel').classList.remove('collapsed');   // 首次运行展开实验面板
+      }
+
+      /* 只保存本页产生的修改，且校验其他标签页是否已更新存档。 */
       let saveTimer = null;
+      let warnedAboutSaveConflict = false;
+      const flushAutosave = (notify) => {
+        if (saveTimer === null) return;
+        clearTimeout(saveTimer);
+        saveTimer = null;
+        try {
+          if (localStorage.getItem('ns.topo') !== savedTopology) {
+            if (notify && !warnedAboutSaveConflict) {
+              NS.toast(NS.t('toast.saveConflict'), 'warn', 6500);
+              warnedAboutSaveConflict = true;
+            }
+            return;
+          }
+          const data = NS.saveTopology();
+          if (NS.Labs.builtSnapshot !== null) data.labBuiltSnapshot = NS.Labs.builtSnapshot;
+          const serialized = JSON.stringify(data);
+          localStorage.setItem('ns.topo', serialized);
+          savedTopology = serialized;
+        } catch (e) {}
+      };
       const autosave = () => {
         clearTimeout(saveTimer);
-        saveTimer = setTimeout(() => {
-          try { localStorage.setItem('ns.topo', JSON.stringify(NS.saveTopology())); } catch (e) {}
-        }, 800);
+        saveTimer = setTimeout(() => flushAutosave(true), 800);
       };
       NS.Bus.on('world:changed', autosave);
       NS.Bus.on('world:cleared', autosave);
       NS.Bus.on('topology:touched', autosave);
-      window.addEventListener('beforeunload', () => {
-        try { localStorage.setItem('ns.topo', JSON.stringify(NS.saveTopology())); } catch (e) {}
-      });
+      window.addEventListener('pagehide', () => flushAutosave(false));
 
-      /* 恢复或首次运行 */
-      let restored = false;
-      try {
-        const s = localStorage.getItem('ns.topo');
-        if (s) restored = NS.loadTopology(JSON.parse(s), { beforeReplace: () => true });
-      } catch (e) {}
-      if (!restored || NS.world.devices.size === 0) {
-        NS.world.clear();
-        $('labs-panel').classList.remove('collapsed');   // 首次运行展开实验面板
-      }
       NS.log({ zh: '网络模拟器就绪', en: 'Simulator ready' }, 'ok');
       NS.SimLoop.start();
     },
